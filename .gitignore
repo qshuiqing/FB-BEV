@@ -157,6 +157,8 @@ work_dirs/
 exps/
 *~
 mmdet3d/.mim
+data
+ckpts
 
 # Pytorch
 *.pth

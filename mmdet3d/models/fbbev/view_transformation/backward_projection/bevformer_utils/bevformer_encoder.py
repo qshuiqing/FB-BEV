@@ -69,10 +69,10 @@ class bevformer_encoder(TransformerLayerSequence):
             Y = torch.arange(*self.y_bound, dtype=torch.float) + self.y_bound[-1]/2
             Z = torch.arange(*self.z_bound, dtype=torch.float) + self.z_bound[-1]/2
             Y, X, Z = torch.meshgrid([Y, X, Z])
-            coords = torch.stack([X, Y, Z], dim=-1)
+            coords = torch.stack([X, Y, Z], dim=-1)  # 100, 100, 4, 3
             coords = coords.to(dtype).to(device)
             # frustum = torch.cat([coords, torch.ones_like(coords[...,0:1])], dim=-1) #(x, y, z, 4)
-            return coords
+            return coords  # 100, 100, 4, 3
 
         # reference points on 2D bev plane, used in temporal self-attention (TSA).
         elif dim == '2d':
@@ -92,15 +92,15 @@ class bevformer_encoder(TransformerLayerSequence):
     def point_sampling(self, reference_points, pc_range,  img_metas, cam_params=None, gt_bboxes_3d=None):
 
         rots, trans, intrins, post_rots, post_trans, bda = cam_params
-        B, N, _ = trans.shape
+        B, N, _ = trans.shape  # 1, 6
         eps = 1e-5
         ogfH, ogfW = self.final_dim
-        reference_points = reference_points[None, None].repeat(B, N, 1, 1, 1, 1)
+        reference_points = reference_points[None, None].repeat(B, N, 1, 1, 1, 1)  # 1, 6, 100, 100, 4, 3
         reference_points = torch.inverse(bda).view(B, 1, 1, 1, 1, 3,
                           3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
-        reference_points -= trans.view(B, N, 1, 1, 1, 3)
-        combine = rots.matmul(torch.inverse(intrins)).inverse()
-        reference_points_cam = combine.view(B, N, 1, 1, 1, 3, 3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
+        reference_points -= trans.view(B, N, 1, 1, 1, 3)  # 1,6,100,100,4,3
+        combine = rots.matmul(torch.inverse(intrins)).inverse()  # 1,6,3,3
+        reference_points_cam = combine.view(B, N, 1, 1, 1, 3, 3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)  # 1,6,100,100,4,3
         reference_points_cam = torch.cat([reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3])*eps),  reference_points_cam[..., 2:3]], 5
             )
@@ -173,7 +173,7 @@ class bevformer_encoder(TransformerLayerSequence):
         bs, len_bev, num_bev_level, _ = ref_2d.shape
         for lid, layer in enumerate(self.layers):
            
-            output = layer(
+            output = layer(  # BEVFormerEncoderLayer
                 bev_query,
                 key,
                 value,

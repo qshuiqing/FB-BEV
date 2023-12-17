@@ -329,7 +329,7 @@ class FBOCC(CenterPoint):
             depth=None
         
         if self.with_specific_component('forward_projection'):
-            bev_feat = self.forward_projection(cam_params, context, depth, **kwargs)
+            bev_feat = self.forward_projection(cam_params, context, depth, **kwargs)  # 1,80,100,100,8
             return_map['cam_params'] = cam_params
         else:
             bev_feat = None
@@ -347,7 +347,7 @@ class FBOCC(CenterPoint):
 
         if self.with_specific_component('backward_projection'):
 
-            bev_feat_refined = self.backward_projection([context],
+            bev_feat_refined = self.backward_projection([context],  # BackwardProjection
                                         img_metas,
                                         lss_bev=bev_feat.mean(-1),
                                         cam_params=cam_params,

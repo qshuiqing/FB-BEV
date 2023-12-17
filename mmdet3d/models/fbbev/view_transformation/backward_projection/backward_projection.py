@@ -99,7 +99,7 @@ class BackwardProjection(BaseModule):
 
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
-        bev_queries = self.bev_embedding.weight.to(dtype)
+        bev_queries = self.bev_embedding.weight.to(dtype)  # 10000, 80
         bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
         
         if lss_bev is not None:
@@ -111,7 +111,7 @@ class BackwardProjection(BaseModule):
 
         bev_pos = self.positional_encoding(bs, self.bev_h, self.bev_w, bev_queries.device).to(dtype)
 
-        bev =  self.transformer(
+        bev =  self.transformer(  # BEVFormer
                 mlvl_feats,
                 bev_queries,
                 self.bev_h,

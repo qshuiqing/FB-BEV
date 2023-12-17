@@ -196,7 +196,8 @@ class DA_SpatialCrossAttention(BaseModule):
         bev_query_depth_rebatch = torch.clip(torch.floor(bev_query_depth_rebatch), 0, DC-1).to(torch.long)
         bev_query_depth_rebatch = F.one_hot(bev_query_depth_rebatch.squeeze(-1),
                                    num_classes=DC)
-                                   
+
+        # DA_MSDeformableAttention
         queries = self.deformable_attention(query=queries_rebatch.view(bs*self.num_cams, max_len, self.embed_dims), key=key, value=value,\
                                             reference_points=reference_points_rebatch.view(bs*self.num_cams, max_len, D, 2), spatial_shapes=spatial_shapes,\
                                             level_start_index=level_start_index,\

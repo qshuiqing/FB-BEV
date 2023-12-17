@@ -112,7 +112,7 @@ class BEVFormer(BaseModule):
 
         feat_flatten = feat_flatten.permute(0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
 
-        bev_embed = self.encoder(
+        bev_embed = self.encoder(  # bevformer_encoder
             bev_queries,
             feat_flatten,
             feat_flatten,

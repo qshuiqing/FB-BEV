@@ -652,11 +652,11 @@ class LSSViewTransformerFunction3D(BaseModule):
         Returns:
             torch.tensor: Bird-eye-view feature in shape (B, C, H_BEV, W_BEV)
         """
-        bev = self.view_transform(cam_params, depth, context)
+        bev = self.view_transform(cam_params, depth, context)  # 6x; 1,6,80,16,44; 1,6,80,16,44;
         if self.extra_relu:
             return bev.relu()
         else:
-            return bev 
+            return bev  # 1, 80, 100, 100, 8
 
     def get_mlp_input(self, rot, tran, intrin, post_rot, post_tran, bda):
         return None
