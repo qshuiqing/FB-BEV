@@ -137,7 +137,7 @@ class TPVFormerHead(BaseModule):
             bev_mask=bev_mask,  # None
         )
 
-        tpv_embed = self.tpv_aggregator(tpv_embed)  # [1, 80, 100, 100, 8]
+        tpv_embed = self.tpv_aggregator(tpv_embed).contiguous()  # [1, 80, 100, 100, 8]
 
         return tpv_embed
 
