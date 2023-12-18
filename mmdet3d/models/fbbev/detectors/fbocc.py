@@ -62,7 +62,7 @@ class FBOCC(CenterPoint):
                  readd=False,
                  fix_void=False,
                  occupancy_save_path=None,
-                 do_history=True,
+                 do_history=True,  # False
                  interpolation_mode='bilinear',
                  history_cat_num=16,
                  history_cat_conv_out_channels=None,
@@ -99,7 +99,7 @@ class FBOCC(CenterPoint):
 
         # Deal with history
         self.single_bev_num_channels = single_bev_num_channels
-        self.do_history = do_history
+        self.do_history = do_history  # False
         self.interpolation_mode = interpolation_mode
         self.history_cat_num = history_cat_num
         self.history_cam_sweep_freq = 0.5 # seconds between each frame
@@ -127,10 +127,10 @@ class FBOCC(CenterPoint):
             nn.ReLU(inplace=True))
         self.history_sweep_time = None
         self.history_bev = None
-        self.history_bev_before_encoder = None
+        # self.history_bev_before_encoder = None
         self.history_seq_ids = None
         self.history_forward_augs = None
-        self.count = 0
+        # self.count = 0
 
     def with_specific_component(self, component_name):
         """Whether the model owns a specific component"""
@@ -347,7 +347,7 @@ class FBOCC(CenterPoint):
 
         if self.with_specific_component('backward_projection'):
 
-            bev_feat_refined = self.backward_projection([context],  # BackwardProjection
+            bev_feat_refined = self.backward_projection([context],  # BackwardProjection [1, 80, 100, 100]
                                         img_metas,
                                         lss_bev=bev_feat.mean(-1),
                                         cam_params=cam_params,
@@ -355,15 +355,15 @@ class FBOCC(CenterPoint):
                                         gt_bboxes_3d=None, # debug
                                         pred_img_depth=depth)  
                                         
-            if self.readd:
-                bev_feat = bev_feat_refined[..., None] + bev_feat
+            if self.readd:  # True
+                bev_feat = bev_feat_refined[..., None] + bev_feat  # [1, 80, 100, 100, 8]
             else:
                 bev_feat = bev_feat_refined
 
         # Fuse History
-        bev_feat = self.fuse_history(bev_feat, img_metas, img[6])
+        bev_feat = self.fuse_history(bev_feat, img_metas, img[6])  # [1, 80, 100, 100, 8]
         
-        bev_feat = self.bev_encoder(bev_feat)
+        bev_feat = self.bev_encoder(bev_feat)  # [1, 256, 100, 100, 8]; [1, 256, 50, 50, 4]; [1, 256, 25, 25, 2]
         return_map['img_bev_feat'] = bev_feat
 
         return return_map
@@ -439,7 +439,7 @@ class FBOCC(CenterPoint):
                                             gt_bboxes_ignore)
             losses.update(losses_pts)
             
-        if self.with_specific_component('occupancy_head'):
+        if self.with_specific_component('occupancy_head'):  # OccHead
             losses_occupancy = self.occupancy_head.forward_train(results['img_bev_feat'], results=results, gt_occupancy=kwargs['gt_occupancy'], gt_occupancy_flow=gt_occupancy_flow)
             losses.update(losses_occupancy)
 

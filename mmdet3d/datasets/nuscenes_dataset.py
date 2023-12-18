@@ -151,7 +151,7 @@ class NuScenesDataset(Custom3DDataset):
                  occupancy_path='/mount/dnn_data/occupancy_2023/gts',
                  ego_cam='CAM_FRONT',
                  # SOLLOFusion
-                 use_sequence_group_flag=False,
+                 use_sequence_group_flag=False,  # True
                  sequences_split_num=1,
                 ):
         self.load_interval = load_interval
@@ -187,8 +187,8 @@ class NuScenesDataset(Custom3DDataset):
         self.ego_cam = ego_cam
 
         # SOLOFusion
-        self.use_sequence_group_flag = use_sequence_group_flag
-        self.sequences_split_num = sequences_split_num
+        self.use_sequence_group_flag = use_sequence_group_flag  # True
+        self.sequences_split_num = sequences_split_num  # 1
         # sequences_split_num splits eacgh sequence into sequences_split_num parts.
         if self.test_mode:
             assert self.sequences_split_num == 1

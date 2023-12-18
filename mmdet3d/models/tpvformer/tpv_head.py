@@ -1,14 +1,13 @@
-
 import torch
 import torch.nn as nn
-from torch.nn.init import normal_
-
-from mmcv.runner import BaseModule
-from mmseg.models import HEADS
 from mmcv.cnn.bricks.transformer import build_positional_encoding, \
     build_transformer_layer_sequence
-from mmcv.runner import force_fp32, auto_fp16
+from mmcv.runner import BaseModule
+from mmcv.runner import auto_fp16
+from mmdet.models import HEADS
+from torch.nn.init import normal_
 
+from mmdet3d.models import builder
 from .modules.cross_view_hybrid_attention import TPVCrossViewHybridAttention
 from .modules.image_cross_attention import TPVMSDeformableAttention3D
 
@@ -18,6 +17,7 @@ class TPVFormerHead(BaseModule):
 
     def __init__(self,
                  positional_encoding=None,
+                 tpv_aggregator=None,
                  tpv_h=30,
                  tpv_w=30,
                  tpv_z=30,
@@ -25,7 +25,7 @@ class TPVFormerHead(BaseModule):
                  num_feature_levels=4,
                  num_cams=6,
                  encoder=None,
-                 embed_dims=256,
+                 embed_dims=256,  # 80
                  **kwargs):
         super().__init__()
 
@@ -43,6 +43,7 @@ class TPVFormerHead(BaseModule):
 
         # positional encoding
         self.positional_encoding = build_positional_encoding(positional_encoding)
+        self.tpv_aggregator = builder.build_head(tpv_aggregator)
 
         # transformer layers
         self.encoder = build_transformer_layer_sequence(encoder)
@@ -69,7 +70,13 @@ class TPVFormerHead(BaseModule):
         normal_(self.cams_embeds)
 
     @auto_fp16(apply_to=('mlvl_feats'))
-    def forward(self, mlvl_feats, img_metas):
+    def forward(self,
+                mlvl_feats,
+                img_metas,
+                lss_bev=None,
+                cam_params=None,
+                bev_mask=None
+                ):
         """Forward function.
         Args:
             mlvl_feats (tuple[Tensor]): Features from the upstream
@@ -81,37 +88,41 @@ class TPVFormerHead(BaseModule):
         device = mlvl_feats[0].device
 
         # tpv queries and pos embeds
-        tpv_queries_hw = self.tpv_embedding_hw.weight.to(dtype)
+        tpv_queries_hw = self.tpv_embedding_hw.weight.to(dtype)  # [1000, 80]
         tpv_queries_zh = self.tpv_embedding_zh.weight.to(dtype)
         tpv_queries_wz = self.tpv_embedding_wz.weight.to(dtype)
-        tpv_queries_hw = tpv_queries_hw.unsqueeze(0).repeat(bs, 1, 1)
+        tpv_queries_hw = tpv_queries_hw.unsqueeze(0).repeat(bs, 1, 1)  # [1, 10000, 80]
         tpv_queries_zh = tpv_queries_zh.unsqueeze(0).repeat(bs, 1, 1)
         tpv_queries_wz = tpv_queries_wz.unsqueeze(0).repeat(bs, 1, 1)
+
+        if lss_bev is not None:  # [1, 80, 100, 100]
+            lss_bev = lss_bev.flatten(2).permute(0, 2, 1)  # [1, 80, 10000]
+            tpv_queries_hw = tpv_queries_hw + lss_bev
 
         tpv_pos_hw = self.positional_encoding(bs, device, 'z')
         tpv_pos_zh = self.positional_encoding(bs, device, 'w')
         tpv_pos_wz = self.positional_encoding(bs, device, 'h')
         tpv_pos = [tpv_pos_hw, tpv_pos_zh, tpv_pos_wz]
-        
+
         # flatten image features of different scales
         feat_flatten = []
         spatial_shapes = []
         for lvl, feat in enumerate(mlvl_feats):
             bs, num_cam, c, h, w = feat.shape
             spatial_shape = (h, w)
-            feat = feat.flatten(3).permute(1, 0, 3, 2) # num_cam, bs, hw, c
+            feat = feat.flatten(3).permute(1, 0, 3, 2)  # num_cam, bs, hw, c
             feat = feat + self.cams_embeds[:, None, None, :].to(dtype)
-            feat = feat + self.level_embeds[None, None, lvl:lvl+1, :].to(dtype)
+            feat = feat + self.level_embeds[None, None, lvl:lvl + 1, :].to(dtype)
             spatial_shapes.append(spatial_shape)
             feat_flatten.append(feat)
 
-        feat_flatten = torch.cat(feat_flatten, 2) # num_cam, bs, hw++, c
+        feat_flatten = torch.cat(feat_flatten, 2)  # num_cam, bs, hw++, c
         spatial_shapes = torch.as_tensor(
             spatial_shapes, dtype=torch.long, device=device)
         level_start_index = torch.cat((spatial_shapes.new_zeros(
             (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
         feat_flatten = feat_flatten.permute(0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
-        tpv_embed = self.encoder(
+        tpv_embed = self.encoder(  # TPVFormerEncoder
             [tpv_queries_hw, tpv_queries_zh, tpv_queries_wz],
             feat_flatten,
             feat_flatten,
@@ -121,13 +132,19 @@ class TPVFormerHead(BaseModule):
             tpv_pos=tpv_pos,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
+            cam_params=cam_params,
             img_metas=img_metas,
+            bev_mask=bev_mask,  # None
         )
-        
+
+        tpv_embed = self.tpv_aggregator(tpv_embed)  # [1, 80, 100, 100, 8]
+
         return tpv_embed
-    
+
 
 from mmcv.cnn.bricks.transformer import POSITIONAL_ENCODING
+
+
 @POSITIONAL_ENCODING.register_module()
 class CustomPositionalEncoding(BaseModule):
 
@@ -146,7 +163,7 @@ class CustomPositionalEncoding(BaseModule):
 
     def forward(self, bs, device, ignore_axis='z'):
         if ignore_axis == 'h':
-            h_embed = torch.zeros(1, 1, self.num_feats[0], device=device).repeat(self.w, self.z, 1) # w, z, d
+            h_embed = torch.zeros(1, 1, self.num_feats[0], device=device).repeat(self.w, self.z, 1)  # w, z, d
             w_embed = self.w_embed(torch.arange(self.w, device=device))
             w_embed = w_embed.reshape(self.w, 1, -1).repeat(1, self.z, 1)
             z_embed = self.z_embed(torch.arange(self.z, device=device))
@@ -166,5 +183,5 @@ class CustomPositionalEncoding(BaseModule):
 
         pos = torch.cat(
             (h_embed, w_embed, z_embed), dim=-1).flatten(0, 1).unsqueeze(0).repeat(
-                bs, 1, 1)
+            bs, 1, 1)
         return pos
