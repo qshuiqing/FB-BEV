@@ -6,12 +6,11 @@
 
 
 # we follow the online training settings  from solofusion
-num_gpus = 1
 samples_per_gpu = 1
 num_iters_per_epoch = 28130
 num_epochs = 24
-checkpoint_epoch_interval = 1
-use_custom_eval_hook = True
+# checkpoint_epoch_interval = 1
+# use_custom_eval_hook = True
 
 # Each nuScenes sequence is ~40 keyframes long. Our training procedure samples
 # sequences first, then loads frames from the sampled sequence in order
@@ -61,42 +60,33 @@ bda_aug_conf = dict(
     flip_dx_ratio=0.5,
     flip_dy_ratio=0.5)
 
-use_checkpoint = True
+use_checkpoint = False
 
 grid_config = {
-    'x': [-40, 40, 0.8],
-    'y': [-40, 40, 0.8],
-    'z': [-1, 5.4, 0.8],
-    'depth': [2.0, 42.0, 0.5],
+    'x': [-40, 40, 0.8],  # 100
+    'y': [-40, 40, 0.8],  # 100
+    'z': [-1, 5.4, 0.8],  # 8
+    'depth': [2.0, 42.0, 0.5],  # 80
 }
-depth_categories = 80  # (grid_config['depth'][1]-grid_config['depth'][0])//grid_config['depth'][2]
+depth_categories = 80
 numC_Trans = 80
+_ffn_dim_ = numC_Trans * 4
 tpv_h_ = 100
 tpv_w_ = 100
 tpv_z_ = 8
 
-# occupancy = False
-# lovasz_input = 'points'
-# ce_input = 'voxel'
-
-_dim_ = 80
+_dim_ = 256
 num_heads = 8
-_ffn_dim_ = _dim_ * 2
+
 _num_levels_ = 4
 _num_cams_ = 6
 
-scale_h = 1
-scale_w = 1
-scale_z = 1
 tpv_encoder_layers = 5
 num_points_in_pillar = [4, 32, 32]
 num_points = [8, 64, 64]
 hybrid_attn_anchors = 16
 hybrid_attn_points = 32
 hybrid_attn_init = 0
-
-grid_size = [tpv_h_ * scale_h, tpv_w_ * scale_w, tpv_z_ * scale_z]
-# nbr_class = 17
 
 empty_idx = 18  # noise 0-->255
 num_cls = 19  # 0 others, 1-16 obj, 17 free
@@ -116,7 +106,7 @@ self_cross_layer = dict(
             tpv_w=tpv_w_,
             tpv_z=tpv_z_,
             num_anchors=hybrid_attn_anchors,
-            embed_dims=_dim_,
+            embed_dims=numC_Trans,
             num_heads=num_heads,
             num_points=hybrid_attn_points,
             init_mode=hybrid_attn_init,
@@ -127,7 +117,7 @@ self_cross_layer = dict(
             num_cams=_num_cams_,
             deformable_attention=dict(
                 type='TPVMSDeformableAttention3D',
-                embed_dims=_dim_,
+                embed_dims=numC_Trans,
                 num_heads=num_heads,
                 num_points=num_points,
                 num_z_anchors=num_points_in_pillar,
@@ -137,14 +127,14 @@ self_cross_layer = dict(
                 tpv_w=tpv_w_,
                 tpv_z=tpv_z_,
             ),
-            embed_dims=_dim_,
+            embed_dims=numC_Trans,
             tpv_h=tpv_h_,
             tpv_w=tpv_w_,
             tpv_z=tpv_z_,
         )
     ],
     feedforward_channels=_ffn_dim_,
-    ffn_dropout=0.1,
+    ffn_dropout=0.0,
     operation_order=('self_attn', 'norm', 'cross_attn', 'norm', 'ffn', 'norm')
 )
 
@@ -157,20 +147,19 @@ self_layer = dict(
             tpv_w=tpv_w_,
             tpv_z=tpv_z_,
             num_anchors=hybrid_attn_anchors,
-            embed_dims=_dim_,
+            embed_dims=numC_Trans,
             num_heads=num_heads,
             num_points=hybrid_attn_points,
             init_mode=hybrid_attn_init,
         )
     ],
     feedforward_channels=_ffn_dim_,
-    ffn_dropout=0.1,
+    ffn_dropout=0.0,
     operation_order=('self_attn', 'norm', 'ffn', 'norm')
 )
 
 model = dict(
     type='TPVFormer',
-    use_grid_mask=True,
     img_backbone=dict(
         pretrained='ckpts/resnet50-0676ba61.pth',
         type='ResNet',
@@ -185,18 +174,18 @@ model = dict(
     img_neck=dict(
         type='CustomFPN',
         in_channels=[1024, 2048],
-        out_channels=_dim_,
+        out_channels=_dim_,  # 256
         num_outs=1,
         start_level=0,
         with_cp=use_checkpoint,
         out_ids=[0]),
     depth_net=dict(
         type='CM_DepthNet',  # camera-aware depth net
-        in_channels=_dim_,
-        context_channels=numC_Trans,
+        in_channels=_dim_,  # 256
+        context_channels=numC_Trans,  # 80
         downsample=16,
         grid_config=grid_config,
-        depth_channels=depth_categories,
+        depth_channels=depth_categories,  # 80
         with_cp=use_checkpoint,
         loss_depth_weight=1.,
         use_dcn=False,
@@ -214,7 +203,7 @@ model = dict(
         pc_range=point_cloud_range,
         num_feature_levels=_num_levels_,
         num_cams=_num_cams_,
-        embed_dims=numC_Trans,
+        embed_dims=numC_Trans,  # 80
         encoder=dict(
             type='TPVFormerEncoder',
             tpv_h=tpv_h_,
@@ -244,12 +233,9 @@ model = dict(
             tpv_h=tpv_h_,
             tpv_w=tpv_w_,
             tpv_z=tpv_z_,
-            in_dims=_dim_,
-            hidden_dims=2 * _dim_,
-            out_dims=_dim_,
-            scale_h=scale_h,
-            scale_w=scale_w,
-            scale_z=scale_z
+            in_dims=numC_Trans,
+            hidden_dims=2 * numC_Trans,
+            out_dims=numC_Trans,
         ),
     ),
     img_bev_encoder_backbone=dict(
@@ -407,27 +393,25 @@ lr_config = dict(
     warmup_ratio=0.001,
     step=[num_iters_per_epoch * num_epochs, ])
 runner = dict(type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-checkpoint_config = dict(
-    interval=checkpoint_epoch_interval * num_iters_per_epoch)
-evaluation = dict(
-    interval=20 * num_iters_per_epoch, pipeline=test_pipeline)
+checkpoint_config = dict(interval=num_iters_per_epoch)
+evaluation = dict(interval=20 * num_iters_per_epoch, pipeline=test_pipeline)
 
 log_config = dict(
     interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
     ])
-custom_hooks = [
-    dict(
-        type='MEGVIIEMAHook',
-        init_updates=10560,
-        priority='NORMAL',
-        interval=2 * num_iters_per_epoch,
-    ),
-    dict(
-        type='SequentialControlHook',
-        temporal_start_iter=num_iters_per_epoch * 2,
-    ),
-]
+# custom_hooks = [
+#     dict(
+#         type='MEGVIIEMAHook',
+#         init_updates=10560,
+#         priority='NORMAL',
+#         interval=2 * num_iters_per_epoch,
+#     ),
+#     dict(
+#         type='SequentialControlHook',
+#         temporal_start_iter=num_iters_per_epoch * 2,
+#     ),
+# ]
 load_from = 'ckpts/r50_256x705_depth_pretrain.pth'
 fp16 = dict(loss_scale='dynamic')
