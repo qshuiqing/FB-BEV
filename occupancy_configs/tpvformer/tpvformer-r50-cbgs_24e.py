@@ -160,6 +160,7 @@ self_layer = dict(
 
 model = dict(
     type='TPVFormer',
+    fix_void=fix_void,
     img_backbone=dict(
         pretrained='ckpts/resnet50-0676ba61.pth',
         type='ResNet',

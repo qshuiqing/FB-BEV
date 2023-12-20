@@ -28,6 +28,7 @@ class TPVFormer(MVXTwoStageDetector):
                  img_bev_encoder_backbone=None,
                  img_bev_encoder_neck=None,
                  occupancy_head=None,
+                 fix_void=False,
                  **kwargs,
                  ):
 
@@ -49,6 +50,8 @@ class TPVFormer(MVXTwoStageDetector):
             self.img_bev_encoder_neck = builder.build_neck(img_bev_encoder_neck)
         if occupancy_head:
             self.occupancy_head = builder.build_head(occupancy_head)
+
+        self.fix_void = fix_void
 
     def image_encoder(self, img):
         imgs = img  # [1, 6, 3, 256, 704]
@@ -160,3 +163,94 @@ class TPVFormer(MVXTwoStageDetector):
         losses.update(loss_depth)
 
         return losses
+
+    def forward_test(self,
+                     points=None,
+                     img_metas=None,
+                     img_inputs=None,
+                     **kwargs):
+        """
+        Args:
+            points (list[torch.Tensor]): the outer list indicates test-time
+                augmentations and inner torch.Tensor should have a shape NxC,
+                which contains all points in the batch.
+            img_metas (list[list[dict]]): the outer list indicates test-time
+                augs (multiscale, flip, etc.) and the inner list indicates
+                images in a batch
+            img (list[torch.Tensor], optional): the outer
+                list indicates test-time augmentations and inner
+                torch.Tensor should have a shape NxCxHxW, which contains
+                all images in the batch. Defaults to None.
+        """
+        self.do_history = True
+        if img_inputs is not None:
+            for var, name in [(img_inputs, 'img_inputs'),
+                              (img_metas, 'img_metas')]:
+                if not isinstance(var, list):
+                    raise TypeError('{} must be a list, but got {}'.format(
+                        name, type(var)))
+            num_augs = len(img_inputs)
+            if num_augs != len(img_metas):
+                raise ValueError(
+                    'num of augmentations ({}) != num of image meta ({})'.format(
+                        len(img_inputs), len(img_metas)))
+
+            if num_augs == 1 and not img_metas[0][0].get('tta_config', dict(dist_tta=False))['dist_tta']:  # True
+                return self.simple_test(points[0], img_metas[0], img_inputs[0],
+                                        **kwargs)
+            else:
+                return self.aug_test(points, img_metas, img_inputs, **kwargs)
+
+        elif points is not None:
+            img_inputs = [img_inputs] if img_inputs is None else img_inputs
+            points = [points] if points is None else points
+            return self.simple_test(points[0], img_metas[0], img_inputs[0],
+                                    **kwargs)
+
+    def simple_test(self,
+                    points,
+                    img_metas,
+                    img=None,
+                    rescale=False,
+                    visible_mask=[None],
+                    return_raw_occ=False,
+                    **kwargs):
+        """Test function without augmentaiton."""
+        results = self.extract_feat(
+            points, img=img, img_metas=img_metas, **kwargs)
+
+        bbox_list = [dict() for _ in range(len(img_metas))]
+
+        if self.with_pts_bbox:  # None
+            bbox_pts = self.simple_test_pts(results['img_bev_feat'], img_metas, rescale=rescale)
+        else:
+            bbox_pts = [None for _ in range(len(img_metas))]
+
+        # if self.with_specific_component('occupancy_head'):
+        pred_occupancy = self.occupancy_head(results['img_bev_feat'], results=results, **kwargs)['output_voxels'][0]
+
+        pred_occupancy = pred_occupancy.permute(0, 2, 3, 4, 1)[0]
+        if self.fix_void:
+            pred_occupancy = pred_occupancy[..., 1:]
+        pred_occupancy = pred_occupancy.softmax(-1)
+
+        # convert to CVPR2023 Format
+        pred_occupancy = pred_occupancy.permute(3, 2, 0, 1)
+        pred_occupancy = torch.flip(pred_occupancy, [2])
+        pred_occupancy = torch.rot90(pred_occupancy, -1, [2, 3])
+        pred_occupancy = pred_occupancy.permute(2, 3, 1, 0)
+
+        if return_raw_occ:
+            pred_occupancy_category = pred_occupancy
+        else:
+            pred_occupancy_category = pred_occupancy.argmax(-1)
+
+        pred_occupancy_category = pred_occupancy_category.cpu().numpy()
+
+        assert len(img_metas) == 1
+        for i, result_dict in enumerate(bbox_list):
+            result_dict['pts_bbox'] = bbox_pts[i]
+            result_dict['iou'] = None
+            result_dict['pred_occupancy'] = pred_occupancy_category
+            result_dict['index'] = img_metas[0]['index']
+        return bbox_list
