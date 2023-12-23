@@ -20,7 +20,7 @@ FB-BEV and FB-OCC are vision-centric autonomous driving perception algorithms ba
 
 | Backbone | Method | Lr Schd | IoU|  Config | Download |
 | :---: | :---: | :---: | :---: | :---: | :---: |
-| R50 | FB-OCC | 20ep | 39.1 |[config](occupancy_configs/fb_occ/fbocc-r50-cbgs_depth_16f_16x4_20e.py) |[model](https://github.com/zhiqi-li/storage/releases/download/v1.0/fbocc-r50-cbgs_depth_16f_16x4_20e.pth)|
+| R50 | FB-OCC | 20ep | 39.1 |[config](occupancy_configs/tpvformer/tpvformer-r50-cbgs_depth_16f_16x4_20e.py) |[model](https://github.com/zhiqi-li/storage/releases/download/v1.0/fbocc-r50-cbgs_depth_16f_16x4_20e.pth)|
 
 * More model weights will be released later.
 

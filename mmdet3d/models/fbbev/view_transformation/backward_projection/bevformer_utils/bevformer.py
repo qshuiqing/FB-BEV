@@ -4,22 +4,18 @@
 # To view a copy of this license, visit 
 # https://github.com/NVlabs/FB-BEV/blob/main/LICENSE
 
-import numpy as np
 import torch
 import torch.nn as nn
-from mmcv.cnn import xavier_init
-from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
+from mmcv.cnn.bricks.transformer import build_positional_encoding, build_transformer_layer_sequence
+from mmcv.runner import auto_fp16
 from mmcv.runner.base_module import BaseModule
-from mmdet.models.utils.builder import TRANSFORMER
+from mmdet.models import DETECTORS
 from torch.nn.init import normal_
-from mmcv.runner.base_module import BaseModule
-from torchvision.transforms.functional import rotate
+
 from .spatial_cross_attention_depth import DA_MSDeformableAttention
-from mmcv.runner import force_fp32, auto_fp16
-from mmdet.models import  build_neck
 
 
-@TRANSFORMER.register_module()
+@DETECTORS.register_module()
 class BEVFormer(BaseModule):
     """Implements the Detr3D transformer.
     Args:
@@ -32,28 +28,50 @@ class BEVFormer(BaseModule):
     """
 
     def __init__(self,
+                 transformer=None,
+                 positional_encoding=None,
+                 pc_range=None,
+                 in_channels=64,
+                 out_channels=64,
+                 use_zero_embedding=False,
+                 bev_h=30,
+                 bev_w=30,
                  num_cams=6,
                  encoder=None,
                  embed_dims=256,
-                 output_dims=256,     
+                 output_dims=256,
                  use_cams_embeds=True,
                  **kwargs):
         super(BEVFormer, self).__init__(**kwargs)
+
+        self.bev_h = bev_h
+        self.bev_w = bev_w
+        self.fp16_enabled = False
+        self.pc_range = pc_range
+        self.use_zero_embedding = use_zero_embedding
+        self.real_w = self.pc_range[3] - self.pc_range[0]
+        self.real_h = self.pc_range[4] - self.pc_range[1]
+
+        self.positional_encoding = build_positional_encoding(
+            positional_encoding)
+
         self.encoder = build_transformer_layer_sequence(encoder)
         self.embed_dims = embed_dims
         self.num_cams = num_cams
         self.fp16_enabled = False
         self.output_dims = output_dims
-    
+
         self.use_cams_embeds = use_cams_embeds
 
-        self.init_layers()       
+        self.init_layers()
 
     def init_layers(self):
         """Initialize layers of the Detr3DTransformer."""
         self.cams_embeds = nn.Parameter(
             torch.Tensor(self.num_cams, self.embed_dims))
-      
+
+        self.bev_embedding = nn.Embedding(
+            self.bev_h * self.bev_w, self.embed_dims)
 
     def init_weights(self):
         """Initialize the transformer weights."""
@@ -69,26 +87,35 @@ class BEVFormer(BaseModule):
         normal_(self.cams_embeds)
 
     @auto_fp16(apply_to=('mlvl_feats', 'bev_queries', 'prev_bev', 'bev_pos'))
-    def forward(
-            self,
-            mlvl_feats,
-            bev_queries,
-            bev_h,
-            bev_w,
-            # grid_length=[0.512, 0.512],
-            bev_pos=None,
-            cam_params=None,
-            gt_bboxes_3d=None,
-            pred_img_depth=None,
-            prev_bev=None,
-            bev_mask=None,
-            **kwargs):
+    def forward(self,
+                mlvl_feats,
+                img_metas,
+                lss_bev=None,
+                gt_bboxes_3d=None,
+                cam_params=None,
+                pred_img_depth=None,
+                bev_mask=None,
+                prev_bev=None,
+                **kwargs):
         """
         obtain bev features.
         """
 
-        bs = mlvl_feats[0].size(0)
+        bs, num_cam, _, _, _ = mlvl_feats[0].shape
+        dtype = mlvl_feats[0].dtype
+        device = mlvl_feats[0].device
 
+        bev_queries = self.bev_embedding.weight.to(dtype)
+        bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
+
+        if lss_bev is not None:
+            lss_bev = lss_bev.flatten(2).permute(2, 0, 1)  # (hw, bs, c)
+            bev_queries = bev_queries + lss_bev
+
+        if bev_mask is not None:
+            bev_mask = bev_mask.reshape(bs, -1)
+
+        bev_pos = self.positional_encoding(bs, self.bev_h, self.bev_w, device).to(dtype)
         bev_pos = bev_pos.flatten(2).permute(2, 0, 1)
 
         feat_flatten = []
@@ -106,7 +133,7 @@ class BEVFormer(BaseModule):
 
         feat_flatten = torch.cat(feat_flatten, 2)
         spatial_shapes = torch.as_tensor(
-            spatial_shapes, dtype=torch.long, device=bev_pos.device)
+            spatial_shapes, dtype=torch.long, device=device)
         level_start_index = torch.cat((spatial_shapes.new_zeros(
             (1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
 
@@ -116,8 +143,8 @@ class BEVFormer(BaseModule):
             bev_queries,
             feat_flatten,
             feat_flatten,
-            bev_h=bev_h,
-            bev_w=bev_w,
+            bev_h=self.bev_h,
+            bev_w=self.bev_w,
             bev_pos=bev_pos,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
@@ -126,8 +153,10 @@ class BEVFormer(BaseModule):
             pred_img_depth=pred_img_depth,
             prev_bev=prev_bev,
             bev_mask=bev_mask,
+            img_metas=img_metas,
             **kwargs
         )
 
-        return bev_embed
+        bev_embed = bev_embed.permute(0, 2, 1).view(bs, -1, self.bev_h, self.bev_w).contiguous()  # (1, 80, 100, 100)
 
+        return bev_embed
