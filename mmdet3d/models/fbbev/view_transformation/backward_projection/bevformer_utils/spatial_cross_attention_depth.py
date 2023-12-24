@@ -45,10 +45,11 @@ class DA_SpatialCrossAttention(BaseModule):
                  dropout=0.1,
                  init_cfg=None,
                  batch_first=False,
-                 deformable_attention=dict(
-                     type='MSDeformableAttention3D',
-                     embed_dims=256,
-                     num_levels=4),
+                 deformable_attention=None,
+                 depth_deformable_attention=None,
+                 tpv_h=None,
+                 tpv_w=None,
+                 tpv_z=None,
                  layer_scale=None,
                  dbound=None,
                  **kwargs
@@ -60,6 +61,7 @@ class DA_SpatialCrossAttention(BaseModule):
         self.pc_range = pc_range
         self.fp16_enabled = False
         self.deformable_attention = build_attention(deformable_attention)
+        self.depth_deformable_attention = build_attention(depth_deformable_attention)
         self.embed_dims = embed_dims
         self.num_cams = num_cams
         self.dbound = dbound
@@ -71,6 +73,7 @@ class DA_SpatialCrossAttention(BaseModule):
                 requires_grad=True)
         else:
             self.layer_scale = None
+        self.tpv_h, self.tpv_w, self.tpv_z = tpv_h, tpv_w, tpv_z
         self.init_weight()
         self.count = 0
 
@@ -128,30 +131,54 @@ class DA_SpatialCrossAttention(BaseModule):
         Returns:
              Tensor: forwarded results with shape [num_query, bs, embed_dims].
         """
+        queries = torch.split(query, [self.tpv_h * self.tpv_w, self.tpv_z * self.tpv_h, self.tpv_w * self.tpv_z], dim=1)
+        # (1, 10000, 80)
+        query_depth = self._depth_deformable_attention(bev_mask,
+                                                       bev_query_depth,
+                                                       key,
+                                                       level_start_index,
+                                                       per_cam_mask_list[0],
+                                                       pred_img_depth,
+                                                       queries[0],
+                                                       query_pos[0],
+                                                       reference_points_cam[0],
+                                                       residual,
+                                                       spatial_shapes,
+                                                       value)
+        tmp_query = torch.cat([queries[1], queries[2]], dim=1)
+        query_normal = self._deformable_attention(key,
+                                                  level_start_index,
+                                                  tmp_query,
+                                                  reference_points_cam[1:],
+                                                  residual,
+                                                  spatial_shapes,
+                                                  per_cam_mask_list[1:],
+                                                  value)
 
+        query = torch.cat([query_depth, query_normal], dim=1)
+
+        return query
+
+    def _depth_deformable_attention(self, bev_mask, bev_query_depth, key, level_start_index, per_cam_mask_list,
+                                    pred_img_depth,
+                                    query, query_pos, reference_points_cam, residual, spatial_shapes, value):
         N, B, len_query, Z, _ = bev_query_depth.shape
         bev_query_depth = bev_query_depth.permute(1, 0, 2, 3, 4)
-
         B, N, DC, H, W = pred_img_depth.shape
         pred_img_depth = pred_img_depth.view(B * N, DC, H, W)
         pred_img_depth = pred_img_depth.flatten(2).permute(0, 2, 1)  # (bs*num_cam, hw, dc)
-
         if key is None:
             key = query
         if value is None:
             value = key
-
         if residual is None:
             inp_residual = query
             slots = torch.zeros_like(query)
         if query_pos is not None:
             query = query + query_pos
-
         bs, num_query, _ = query.size()
-
         D = reference_points_cam.size(3)
         indexes = [[] for _ in range(bs)]
-
         if bev_mask is not None:
             per_cam_mask_list_ = per_cam_mask_list & bev_mask[None, :, :, None]
         else:
@@ -164,7 +191,6 @@ class DA_SpatialCrossAttention(BaseModule):
                     index_query_per_img = per_cam_mask_list[i][j].sum(-1).nonzero().squeeze(-1)[0:1]
                 indexes[j].append(index_query_per_img)
                 max_len = max(max_len, len(index_query_per_img))
-
         # each camera only interacts with its corresponding BEV queries. This step can  greatly save GPU memory.
         queries_rebatch = query.new_zeros(
             [bs, self.num_cams, max_len, self.embed_dims])
@@ -172,7 +198,6 @@ class DA_SpatialCrossAttention(BaseModule):
             [bs, self.num_cams, max_len, D, 2])
         bev_query_depth_rebatch = reference_points_cam.new_zeros(
             [bs, self.num_cams, max_len, D, 1])
-
         for j in range(bs):
             for i, reference_points_per_img in enumerate(reference_points_cam):
                 index_query_per_img = indexes[j][i]
@@ -181,45 +206,109 @@ class DA_SpatialCrossAttention(BaseModule):
 
                 reference_points_rebatch[j, i, :len(index_query_per_img)] = reference_points_per_img[
                     j, index_query_per_img]
-
         num_cams, l, bs, embed_dims = key.shape
-
         key = key.permute(2, 0, 1, 3).reshape(
             bs * self.num_cams, l, self.embed_dims)
         value = value.permute(2, 0, 1, 3).reshape(
             bs * self.num_cams, l, self.embed_dims)
-
         bev_query_depth_rebatch = (bev_query_depth_rebatch - self.dbound[0]) / self.dbound[2]
         bev_query_depth_rebatch = torch.clip(torch.floor(bev_query_depth_rebatch), 0, DC - 1).to(torch.long)
         bev_query_depth_rebatch = F.one_hot(bev_query_depth_rebatch.squeeze(-1),
                                             num_classes=DC)
-
-        queries = self.deformable_attention(query=queries_rebatch.view(bs * self.num_cams, max_len, self.embed_dims),
-                                            key=key, value=value, \
-                                            reference_points=reference_points_rebatch.view(bs * self.num_cams, max_len,
-                                                                                           D, 2),
-                                            spatial_shapes=spatial_shapes, \
-                                            level_start_index=level_start_index, \
-                                            bev_query_depth=bev_query_depth_rebatch.view(bs * self.num_cams, max_len, D,
-                                                                                         DC), \
-                                            pred_img_depth=pred_img_depth, \
-                                            ).view(bs, self.num_cams, max_len, self.embed_dims)
-
+        queries = self.depth_deformable_attention(
+            query=queries_rebatch.view(bs * self.num_cams, max_len, self.embed_dims),
+            key=key, value=value, \
+            reference_points=reference_points_rebatch.view(bs * self.num_cams, max_len,
+                                                           D, 2),
+            spatial_shapes=spatial_shapes, \
+            level_start_index=level_start_index, \
+            bev_query_depth=bev_query_depth_rebatch.view(bs * self.num_cams, max_len, D,
+                                                         DC), \
+            pred_img_depth=pred_img_depth, \
+            ).view(bs, self.num_cams, max_len, self.embed_dims)
         for j in range(bs):
             for i in range(num_cams):
                 index_query_per_img = indexes[j][i]
                 slots[j, index_query_per_img] += queries[j, i, :len(index_query_per_img)]
-
         count = per_cam_mask_list_.sum(-1) > 0
         count = count.permute(1, 2, 0).sum(-1)
         count = torch.clamp(count, min=1.0)
         slots = slots / count[..., None]
-
         slots = self.output_proj(slots)
         if self.layer_scale is None:
             return self.dropout(slots) + inp_residual
         else:
             return self.dropout(self.layer_scale * slots) + inp_residual
+
+    def _deformable_attention(self, key, level_start_index, query, reference_points_cams, residual, spatial_shapes,
+                              tpv_masks, value):
+        if key is None:
+            key = query
+        if value is None:
+            value = key
+        if residual is None:
+            inp_residual = query
+        bs, num_query, _ = query.size()
+
+        queries = torch.split(query, [self.tpv_z * self.tpv_h, self.tpv_w * self.tpv_z], dim=1)
+        if residual is None:
+            slots = [torch.zeros_like(q) for q in queries]
+        indexeses = []
+        max_lens = []
+        queries_rebatches = []
+        reference_points_rebatches = []
+        for tpv_idx, tpv_mask in enumerate(tpv_masks):
+            indexes = []
+            for _, mask_per_img in enumerate(tpv_mask):
+                index_query_per_img = mask_per_img[0].sum(-1).nonzero().squeeze(-1)
+                indexes.append(index_query_per_img)
+            max_len = max([len(each) for each in indexes])
+            max_lens.append(max_len)
+            indexeses.append(indexes)
+
+            reference_points_cam = reference_points_cams[tpv_idx]
+            D = reference_points_cam.size(3)
+
+            queries_rebatch = queries[tpv_idx].new_zeros(
+                [bs * self.num_cams, max_len, self.embed_dims])
+            reference_points_rebatch = reference_points_cam.new_zeros(
+                [bs * self.num_cams, max_len, D, 2])
+
+            for i, reference_points_per_img in enumerate(reference_points_cam):
+                for j in range(bs):
+                    index_query_per_img = indexes[i]
+                    queries_rebatch[j * self.num_cams + i, :len(index_query_per_img)] = queries[tpv_idx][
+                        j, index_query_per_img]
+                    reference_points_rebatch[j * self.num_cams + i, :len(index_query_per_img)] = \
+                        reference_points_per_img[j, index_query_per_img]
+
+            queries_rebatches.append(queries_rebatch)
+            reference_points_rebatches.append(reference_points_rebatch)
+        num_cams, l, bs, embed_dims = key.shape
+        key = key.permute(0, 2, 1, 3).view(
+            self.num_cams * bs, l, self.embed_dims)
+        value = value.permute(0, 2, 1, 3).view(
+            self.num_cams * bs, l, self.embed_dims)
+        queries = self.deformable_attention(
+            query=queries_rebatches,
+            key=key,
+            value=value,
+            reference_points=reference_points_rebatches,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index)
+        for tpv_idx, indexes in enumerate(indexeses):
+            for i, index_query_per_img in enumerate(indexes):
+                for j in range(bs):
+                    slots[tpv_idx][j, index_query_per_img] += queries[tpv_idx][j * self.num_cams + i,
+                                                              :len(index_query_per_img)]
+
+            count = tpv_masks[tpv_idx].sum(-1) > 0
+            count = count.permute(1, 2, 0).sum(-1)
+            count = torch.clamp(count, min=1.0)
+            slots[tpv_idx] = slots[tpv_idx] / count[..., None]
+        slots = torch.cat(slots, dim=1)
+        slots = self.output_proj(slots)
+        return self.dropout(slots) + inp_residual
 
 
 @ATTENTION.register_module()

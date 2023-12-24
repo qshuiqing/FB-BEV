@@ -1,17 +1,17 @@
-
-from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+import math
 import warnings
+
 import torch
 import torch.nn as nn
 from mmcv.cnn import xavier_init, constant_init
 from mmcv.cnn.bricks.registry import ATTENTION
 from mmcv.cnn.bricks.transformer import build_attention
-import math
-from mmcv.runner import force_fp32, auto_fp16
+from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+from mmcv.runner import force_fp32
 from mmcv.runner.base_module import BaseModule
 from mmcv.utils import ext_loader
-from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32
 
+from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32
 
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
@@ -118,7 +118,7 @@ class TPVImageCrossAttention(BaseModule):
 
         bs, num_query, _ = query.size()
 
-        queries = torch.split(query, [self.tpv_h*self.tpv_w, self.tpv_z*self.tpv_h, self.tpv_w*self.tpv_z], dim=1)
+        queries = torch.split(query, [self.tpv_h * self.tpv_w, self.tpv_z * self.tpv_h, self.tpv_w * self.tpv_z], dim=1)
         if residual is None:
             slots = [torch.zeros_like(q) for q in queries]
         indexeses = []
@@ -145,9 +145,11 @@ class TPVImageCrossAttention(BaseModule):
             for i, reference_points_per_img in enumerate(reference_points_cam):
                 for j in range(bs):
                     index_query_per_img = indexes[i]
-                    queries_rebatch[j * self.num_cams + i, :len(index_query_per_img)] = queries[tpv_idx][j, index_query_per_img]
-                    reference_points_rebatch[j * self.num_cams + i, :len(index_query_per_img)] = reference_points_per_img[j, index_query_per_img]
-            
+                    queries_rebatch[j * self.num_cams + i, :len(index_query_per_img)] = queries[tpv_idx][
+                        j, index_query_per_img]
+                    reference_points_rebatch[j * self.num_cams + i, :len(index_query_per_img)] = \
+                    reference_points_per_img[j, index_query_per_img]
+
             queries_rebatches.append(queries_rebatch)
             reference_points_rebatches.append(reference_points_rebatch)
 
@@ -162,14 +164,15 @@ class TPVImageCrossAttention(BaseModule):
             query=queries_rebatches,
             key=key,
             value=value,
-            reference_points=reference_points_rebatches, 
+            reference_points=reference_points_rebatches,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index)
-        
+
         for tpv_idx, indexes in enumerate(indexeses):
             for i, index_query_per_img in enumerate(indexes):
                 for j in range(bs):
-                    slots[tpv_idx][j, index_query_per_img] += queries[tpv_idx][j * self.num_cams + i, :len(index_query_per_img)]
+                    slots[tpv_idx][j, index_query_per_img] += queries[tpv_idx][j * self.num_cams + i,
+                                                              :len(index_query_per_img)]
 
             count = tpv_masks[tpv_idx].sum(-1) > 0
             count = count.permute(1, 2, 0).sum(-1)
@@ -211,8 +214,8 @@ class TPVMSDeformableAttention3D(BaseModule):
                  embed_dims=256,
                  num_heads=8,
                  num_levels=4,
-                 num_points=[8, 64, 64],
-                 num_z_anchors=[4, 32, 32],
+                 num_points=[64, 64],
+                 num_z_anchors=[32, 32],
                  pc_range=None,
                  im2col_step=64,
                  dropout=0.1,
@@ -223,7 +226,7 @@ class TPVMSDeformableAttention3D(BaseModule):
                  tpv_h=None,
                  tpv_w=None,
                  tpv_z=None,
-                ):
+                 ):
         super().__init__(init_cfg)
         if embed_dims % num_heads != 0:
             raise ValueError(f'embed_dims must be divisible by num_heads, '
@@ -256,17 +259,17 @@ class TPVMSDeformableAttention3D(BaseModule):
         self.num_heads = num_heads
         self.num_points = num_points
         self.num_z_anchors = num_z_anchors
-        self.base_num_points = num_points[0]
-        self.base_z_anchors = num_z_anchors[0]
+        # self.base_num_points = num_points[0]  # 8
+        self.base_z_anchors = 4
         self.points_multiplier = [points // self.base_z_anchors for points in num_z_anchors]
         self.pc_range = pc_range
         self.tpv_h, self.tpv_w, self.tpv_z = tpv_h, tpv_w, tpv_z
         self.sampling_offsets = nn.ModuleList([
-            nn.Linear(embed_dims, num_heads * num_levels * num_points[i] * 2) for i in range(3)
+            nn.Linear(embed_dims, num_heads * num_levels * num_points[i] * 2) for i in range(2)
         ])
         self.floor_sampling_offset = floor_sampling_offset
         self.attention_weights = nn.ModuleList([
-            nn.Linear(embed_dims, num_heads * num_levels * num_points[i]) for i in range(3)
+            nn.Linear(embed_dims, num_heads * num_levels * num_points[i]) for i in range(2)
         ])
         self.value_proj = nn.Linear(embed_dims, embed_dims)
 
@@ -274,7 +277,7 @@ class TPVMSDeformableAttention3D(BaseModule):
 
     def init_weights(self):
         """Default initialization for Parameters of Module."""
-        for i in range(3):
+        for i in range(2):
             constant_init(self.sampling_offsets[i], 0.)
             thetas = torch.arange(
                 self.num_heads, dtype=torch.float32) * (2.0 * math.pi / self.num_heads)
@@ -284,7 +287,7 @@ class TPVMSDeformableAttention3D(BaseModule):
             grid_init = grid_init.reshape(self.num_heads, self.num_levels, self.num_z_anchors[i], -1, 2)
             for j in range(self.num_points[i] // self.num_z_anchors[i]):
                 grid_init[:, :, :, j, :] *= j + 1
-        
+
             self.sampling_offsets[i].bias.data = grid_init.view(-1)
             constant_init(self.attention_weights[i], val=0., bias=0.)
         xavier_init(self.value_proj, distribution='uniform', bias=0.)
@@ -306,7 +309,7 @@ class TPVMSDeformableAttention3D(BaseModule):
             attention = attention.view(bs, l, self.num_heads, self.num_levels, self.points_multiplier[i], -1)
             attention = attention.permute(0, 1, 4, 2, 3, 5).flatten(1, 2)
             attns.append(attention)
-        
+
         offsets = torch.cat(offsets, dim=1)
         attns = torch.cat(attns, dim=1)
         return offsets, attns
@@ -314,16 +317,16 @@ class TPVMSDeformableAttention3D(BaseModule):
     def reshape_reference_points(self, reference_points):
         reference_point_list = []
         for i, reference_point in enumerate(reference_points):
-            bs, l, z_anchors, _  = reference_point.shape
+            bs, l, z_anchors, _ = reference_point.shape
             reference_point = reference_point.reshape(bs, l, self.points_multiplier[i], -1, 2)
             reference_point = reference_point.flatten(1, 2)
             reference_point_list.append(reference_point)
         return torch.cat(reference_point_list, dim=1)
-    
+
     def reshape_output(self, output, lens):
         bs, _, d = output.shape
-        outputs = torch.split(output, [lens[0]*self.points_multiplier[0], lens[1]*self.points_multiplier[1], lens[2]*self.points_multiplier[2]], dim=1)
-        
+        outputs = torch.split(output, [lens[0] * self.points_multiplier[0], lens[1] * self.points_multiplier[1]], dim=1)
+
         outputs = [o.reshape(bs, -1, self.points_multiplier[i], d).sum(dim=2) for i, o in enumerate(outputs)]
         return outputs
 
@@ -391,7 +394,7 @@ class TPVMSDeformableAttention3D(BaseModule):
         sampling_offsets, attention_weights = self.get_sampling_offsets_and_attention(query)
 
         reference_points = self.reshape_reference_points(reference_points)
-        
+
         if reference_points.shape[-1] == 2:
             """
             For each TPV query, it owns `num_Z_anchors` in 3D space that having different heights.
@@ -405,7 +408,7 @@ class TPVMSDeformableAttention3D(BaseModule):
             bs, num_query, num_Z_anchors, xy = reference_points.shape
             reference_points = reference_points[:, :, None, None, :, None, :]
             sampling_offsets = sampling_offsets / \
-                offset_normalizer[None, None, None, :, None, :]
+                               offset_normalizer[None, None, None, :, None, :]
             bs, num_query, num_heads, num_levels, num_all_points, xy = sampling_offsets.shape
             sampling_offsets = sampling_offsets.view(
                 bs, num_query, num_heads, num_levels, num_Z_anchors, num_all_points // num_Z_anchors, xy)
@@ -415,7 +418,7 @@ class TPVMSDeformableAttention3D(BaseModule):
 
             sampling_locations = sampling_locations.view(
                 bs, num_query, num_heads, num_levels, num_all_points, xy)
-            
+
             if self.floor_sampling_offset:
                 sampling_locations = sampling_locations - torch.floor(sampling_locations)
 

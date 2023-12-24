@@ -331,7 +331,7 @@ class FBOCC(CenterPoint):
             bev_mask = None
 
         if self.with_specific_component('backward_projection'):  # BEVFormer
-
+            # (1, 80, 100, 100, 8)
             bev_feat_refined = self.backward_projection([context],
                                                         img_metas,
                                                         lss_bev=bev_feat.mean(-1),
@@ -341,7 +341,7 @@ class FBOCC(CenterPoint):
                                                         pred_img_depth=depth)
 
             if self.readd:
-                bev_feat = bev_feat_refined[..., None] + bev_feat
+                bev_feat = bev_feat_refined + bev_feat
             else:
                 bev_feat = bev_feat_refined
 

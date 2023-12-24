@@ -44,6 +44,7 @@ class BEVFormer(BaseModule):
                  embed_dims=256,
                  output_dims=256,
                  use_cams_embeds=True,
+                 with_cp=True,
                  **kwargs):
         super(BEVFormer, self).__init__(**kwargs)
 
@@ -74,6 +75,15 @@ class BEVFormer(BaseModule):
         self.tpv_embedding_hw = nn.Embedding(self.tpv_h * self.tpv_w, self.embed_dims)
         self.tpv_embedding_zh = nn.Embedding(self.tpv_z * self.tpv_h, self.embed_dims)
         self.tpv_embedding_wz = nn.Embedding(self.tpv_w * self.tpv_z, self.embed_dims)
+
+        self.decoder = nn.Sequential(
+            nn.Linear(embed_dims, embed_dims * 2),
+            nn.Softplus(),
+            nn.Linear(embed_dims * 2, embed_dims)
+        )
+        self.with_cp = with_cp
+
+        # self.classifier = nn.Linear(embed_dims, nbr_classes)
 
     def init_weights(self):
         """Initialize the transformer weights."""
@@ -165,6 +175,34 @@ class BEVFormer(BaseModule):
             **kwargs
         )
 
-        bev_embed = bev_embed.permute(0, 2, 1).view(bs, -1, self.bev_h, self.bev_w).contiguous()  # (1, 80, 100, 100)
+        # bev_embed = bev_embed.permute(0, 2, 1).view(bs, -1, self.bev_h, self.bev_w).contiguous()  # (1, 80, 100, 100)
+
+        bev_embed = self.aggregator(bev_embed).contiguous()
 
         return bev_embed
+
+    def aggregator(self, tpv_list):
+        """
+        tpv_list[0]: bs, h*w, c
+        tpv_list[1]: bs, z*h, c
+        tpv_list[2]: bs, w*z, c
+        """
+        tpv_hw, tpv_zh, tpv_wz = tpv_list[0], tpv_list[1], tpv_list[2]
+        bs, _, c = tpv_hw.shape
+        tpv_hw = tpv_hw.permute(0, 2, 1).reshape(bs, c, self.tpv_h, self.tpv_w)
+        tpv_zh = tpv_zh.permute(0, 2, 1).reshape(bs, c, self.tpv_z, self.tpv_h)
+        tpv_wz = tpv_wz.permute(0, 2, 1).reshape(bs, c, self.tpv_w, self.tpv_z)
+
+        tpv_hw = tpv_hw.unsqueeze(-1).permute(0, 1, 3, 2, 4).expand(-1, -1, -1, -1, self.tpv_z)
+        tpv_zh = tpv_zh.unsqueeze(-1).permute(0, 1, 4, 3, 2).expand(-1, -1, self.tpv_w, -1, -1)
+        tpv_wz = tpv_wz.unsqueeze(-1).permute(0, 1, 2, 4, 3).expand(-1, -1, -1, self.tpv_h, -1)
+
+        fused = tpv_hw + tpv_zh + tpv_wz
+        fused = fused.permute(0, 2, 3, 4, 1)
+        if self.with_cp:
+            fused = torch.utils.checkpoint.checkpoint(self.decoder, fused)
+        else:
+            fused = self.decoder(fused)
+        fused = fused.permute(0, 4, 1, 2, 3)
+
+        return fused
