@@ -4,27 +4,24 @@
 # To view a copy of this license, visit 
 # https://github.com/NVlabs/FB-BEV/blob/main/LICENSE
 
-from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+import math
 import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.cnn import xavier_init, constant_init
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER,
-                                      TRANSFORMER_LAYER_SEQUENCE)
+from mmcv.cnn.bricks.registry import (ATTENTION)
 from mmcv.cnn.bricks.transformer import build_attention
-import math
-from mmcv.runner import force_fp32, auto_fp16
-
-from mmcv.runner.base_module import BaseModule, ModuleList, Sequential
-
+from mmcv.ops.multi_scale_deform_attn import multi_scale_deformable_attn_pytorch
+from mmcv.runner import force_fp32
+from mmcv.runner.base_module import BaseModule
 from mmcv.utils import ext_loader
-from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32, \
-    MultiScaleDeformableAttnFunction_fp16
+
+from .multi_scale_deformable_attn_function import MultiScaleDeformableAttnFunction_fp32
+
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
-
 
 
 @ATTENTION.register_module()
@@ -52,8 +49,8 @@ class DA_SpatialCrossAttention(BaseModule):
                      type='MSDeformableAttention3D',
                      embed_dims=256,
                      num_levels=4),
-                layer_scale=None,
-                dbound=None,
+                 layer_scale=None,
+                 dbound=None,
                  **kwargs
                  ):
         super(DA_SpatialCrossAttention, self).__init__(init_cfg)
@@ -69,7 +66,7 @@ class DA_SpatialCrossAttention(BaseModule):
         self.output_proj = nn.Linear(embed_dims, embed_dims)
         self.batch_first = batch_first
         if layer_scale is not None:
-            self.layer_scale =  nn.Parameter(
+            self.layer_scale = nn.Parameter(
                 layer_scale * torch.ones(embed_dims),
                 requires_grad=True)
         else:
@@ -80,7 +77,7 @@ class DA_SpatialCrossAttention(BaseModule):
     def init_weight(self):
         """Default initialization for Parameters of Module."""
         xavier_init(self.output_proj, distribution='uniform', bias=0.)
-    
+
     @force_fp32(apply_to=('query', 'key', 'value', 'query_pos', 'reference_points_cam'))
     def forward(self,
                 query,
@@ -97,7 +94,7 @@ class DA_SpatialCrossAttention(BaseModule):
                 bev_query_depth=None,
                 pred_img_depth=None,
                 bev_mask=None,
-                per_cam_mask_list=None,                
+                per_cam_mask_list=None,
                 **kwargs):
         """Forward Function of Detr3DCrossAtten.
         Args:
@@ -133,10 +130,11 @@ class DA_SpatialCrossAttention(BaseModule):
         """
 
         N, B, len_query, Z, _ = bev_query_depth.shape
+        bev_query_depth = bev_query_depth.permute(1, 0, 2, 3, 4)
+
         B, N, DC, H, W = pred_img_depth.shape
-        bev_query_depth = bev_query_depth.permute(1, 0, 2, 3, 4) 
-        pred_img_depth = pred_img_depth.view(B*N, DC, H, W)
-        pred_img_depth = pred_img_depth.flatten(2).permute(0, 2, 1)
+        pred_img_depth = pred_img_depth.view(B * N, DC, H, W)
+        pred_img_depth = pred_img_depth.flatten(2).permute(0, 2, 1)  # (bs*num_cam, hw, dc)
 
         if key is None:
             key = query
@@ -166,7 +164,6 @@ class DA_SpatialCrossAttention(BaseModule):
                     index_query_per_img = per_cam_mask_list[i][j].sum(-1).nonzero().squeeze(-1)[0:1]
                 indexes[j].append(index_query_per_img)
                 max_len = max(max_len, len(index_query_per_img))
-        
 
         # each camera only interacts with its corresponding BEV queries. This step can  greatly save GPU memory.
         queries_rebatch = query.new_zeros(
@@ -177,12 +174,13 @@ class DA_SpatialCrossAttention(BaseModule):
             [bs, self.num_cams, max_len, D, 1])
 
         for j in range(bs):
-            for i, reference_points_per_img in enumerate(reference_points_cam):   
+            for i, reference_points_per_img in enumerate(reference_points_cam):
                 index_query_per_img = indexes[j][i]
                 queries_rebatch[j, i, :len(index_query_per_img)] = query[j, index_query_per_img]
                 bev_query_depth_rebatch[j, i, :len(index_query_per_img)] = bev_query_depth[j, i, index_query_per_img]
 
-                reference_points_rebatch[j, i, :len(index_query_per_img)] = reference_points_per_img[j, index_query_per_img]
+                reference_points_rebatch[j, i, :len(index_query_per_img)] = reference_points_per_img[
+                    j, index_query_per_img]
 
         num_cams, l, bs, embed_dims = key.shape
 
@@ -191,19 +189,22 @@ class DA_SpatialCrossAttention(BaseModule):
         value = value.permute(2, 0, 1, 3).reshape(
             bs * self.num_cams, l, self.embed_dims)
 
-
-        bev_query_depth_rebatch = (bev_query_depth_rebatch- self.dbound[0])/ self.dbound[2]
-        bev_query_depth_rebatch = torch.clip(torch.floor(bev_query_depth_rebatch), 0, DC-1).to(torch.long)
+        bev_query_depth_rebatch = (bev_query_depth_rebatch - self.dbound[0]) / self.dbound[2]
+        bev_query_depth_rebatch = torch.clip(torch.floor(bev_query_depth_rebatch), 0, DC - 1).to(torch.long)
         bev_query_depth_rebatch = F.one_hot(bev_query_depth_rebatch.squeeze(-1),
-                                   num_classes=DC)
-                                   
-        queries = self.deformable_attention(query=queries_rebatch.view(bs*self.num_cams, max_len, self.embed_dims), key=key, value=value,\
-                                            reference_points=reference_points_rebatch.view(bs*self.num_cams, max_len, D, 2), spatial_shapes=spatial_shapes,\
-                                            level_start_index=level_start_index,\
-                                            bev_query_depth=bev_query_depth_rebatch.view(bs*self.num_cams, max_len, D, DC),\
+                                            num_classes=DC)
+
+        queries = self.deformable_attention(query=queries_rebatch.view(bs * self.num_cams, max_len, self.embed_dims),
+                                            key=key, value=value, \
+                                            reference_points=reference_points_rebatch.view(bs * self.num_cams, max_len,
+                                                                                           D, 2),
+                                            spatial_shapes=spatial_shapes, \
+                                            level_start_index=level_start_index, \
+                                            bev_query_depth=bev_query_depth_rebatch.view(bs * self.num_cams, max_len, D,
+                                                                                         DC), \
                                             pred_img_depth=pred_img_depth, \
                                             ).view(bs, self.num_cams, max_len, self.embed_dims)
-                        
+
         for j in range(bs):
             for i in range(num_cams):
                 index_query_per_img = indexes[j][i]
@@ -214,14 +215,11 @@ class DA_SpatialCrossAttention(BaseModule):
         count = torch.clamp(count, min=1.0)
         slots = slots / count[..., None]
 
-
         slots = self.output_proj(slots)
         if self.layer_scale is None:
             return self.dropout(slots) + inp_residual
         else:
-            return  self.dropout(self.layer_scale * slots) +  inp_residual
-
-
+            return self.dropout(self.layer_scale * slots) + inp_residual
 
 
 @ATTENTION.register_module()
@@ -300,7 +298,7 @@ class DA_MSDeformableAttention(BaseModule):
         self.attention_weights = nn.Linear(embed_dims,
                                            num_heads * num_levels * num_points)
         self.value_proj = nn.Linear(embed_dims, embed_dims)
-       
+
         self.init_weights()
 
     def init_weights(self):
@@ -309,14 +307,14 @@ class DA_MSDeformableAttention(BaseModule):
         thetas = torch.arange(
             self.num_heads,
             dtype=torch.float32) * (2.0 * math.pi / self.num_heads)
-        
+
         self.each_anchor_points = self.num_points // self.num_Z_anchors
 
         grid_init = torch.stack([thetas.cos(), thetas.sin()], -1)
         grid_init = (grid_init /
                      grid_init.abs().max(-1, keepdim=True)[0]).view(
             self.num_heads, 1, 1, 1,
-            2).repeat(1, self.num_levels,  self.each_anchor_points, self.num_Z_anchors, 1)
+            2).repeat(1, self.num_levels, self.each_anchor_points, self.num_Z_anchors, 1)
         for i in range(self.each_anchor_points):
             for j in range(self.num_Z_anchors):
                 grid_init[:, :, i, j, :] *= i + 1
@@ -340,7 +338,7 @@ class DA_MSDeformableAttention(BaseModule):
                 level_start_index=None,
                 bev_query_depth=None,
                 pred_img_depth=None,
-               
+
                 **kwargs):
         """Forward Function of MultiScaleDeformAttention.
         Args:
@@ -424,7 +422,7 @@ class DA_MSDeformableAttention(BaseModule):
             reference_points = reference_points[:, :, None, None, None, :, :]
 
             sampling_offsets = sampling_offsets / \
-                offset_normalizer[None, None, None, :, None, :]
+                               offset_normalizer[None, None, None, :, None, :]
             bs, num_query, num_heads, num_levels, num_all_points, xy = sampling_offsets.shape
             sampling_offsets = sampling_offsets.view(
                 bs, num_query, num_heads, num_levels, num_all_points // num_Z_anchors, num_Z_anchors, xy)
@@ -448,13 +446,15 @@ class DA_MSDeformableAttention(BaseModule):
             else:
                 MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
             depth_reference_points = reference_points.reshape(bs, num_query * num_Z_anchors, 1, 1, 1, 2).contiguous()
-            depth_attention_weights = torch.ones_like(depth_reference_points[...,0]).contiguous()
+            depth_attention_weights = torch.ones_like(depth_reference_points[..., 0]).contiguous()
             depth_weights = MultiScaleDeformableAttnFunction.apply(
-                pred_img_depth.unsqueeze(2).contiguous(), spatial_shapes[0:1], level_start_index[0:1], depth_reference_points,
+                pred_img_depth.unsqueeze(2).contiguous(), spatial_shapes[0:1], level_start_index[0:1],
+                depth_reference_points,
                 depth_attention_weights, self.im2col_step).reshape(bs, num_query, num_Z_anchors, -1)
             depth_weights = (depth_weights * bev_query_depth).sum(-1)
-            depth_weights = depth_weights.unsqueeze(2).repeat(1,1, num_points, 1).reshape(bs, num_query, num_all_points)
-            
+            depth_weights = depth_weights.unsqueeze(2).repeat(1, 1, num_points, 1).reshape(bs, num_query,
+                                                                                           num_all_points)
+
             attention_weights = attention_weights * depth_weights[:, :, None, None, :]
             output = MultiScaleDeformableAttnFunction.apply(
                 value, spatial_shapes, level_start_index, sampling_locations,
