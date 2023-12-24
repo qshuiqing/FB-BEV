@@ -48,8 +48,6 @@ class BEVFormer(BaseModule):
                  **kwargs):
         super(BEVFormer, self).__init__(**kwargs)
 
-        # self.bev_h = bev_h
-        # self.bev_w = bev_w
         self.tpv_h = tpv_h
         self.tpv_w = tpv_w
         self.tpv_z = tpv_z

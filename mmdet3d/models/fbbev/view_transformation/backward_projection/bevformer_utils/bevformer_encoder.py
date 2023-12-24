@@ -56,17 +56,17 @@ class bevformer_encoder(TransformerLayerSequence):
         self.fp16_enabled = False
 
         ref_3d_hw = self.get_reference_points(tpv_h, tpv_w, pc_range[5] - pc_range[2], num_points_in_pillar[0], '3d',
-                                              device='cpu')
+                                              device='cpu')  # (HW, num_points_in_pillar, 3)
 
         ref_3d_zh = self.get_reference_points(tpv_z, tpv_h, pc_range[3] - pc_range[0], num_points_in_pillar[1], '3d',
                                               device='cpu')
-        ref_3d_zh = ref_3d_zh.permute(3, 0, 1, 2)[[2, 0, 1]]
-        ref_3d_zh = ref_3d_zh.permute(1, 2, 3, 0)
+        ref_3d_zh = ref_3d_zh.permute(2, 0, 1)[[2, 0, 1]]  # (3, 800, 32)
+        ref_3d_zh = ref_3d_zh.permute(1, 2, 0)  # (800, 32, 3)
 
         ref_3d_wz = self.get_reference_points(tpv_w, tpv_z, pc_range[4] - pc_range[1], num_points_in_pillar[2], '3d',
                                               device='cpu')
-        ref_3d_wz = ref_3d_wz.permute(3, 0, 1, 2)[[1, 2, 0]]
-        ref_3d_wz = ref_3d_wz.permute(1, 2, 3, 0)
+        ref_3d_wz = ref_3d_wz.permute(2, 0, 1)[[1, 2, 0]]
+        ref_3d_wz = ref_3d_wz.permute(1, 2, 0)
         self.register_buffer('ref_3d_hw', ref_3d_hw)
         self.register_buffer('ref_3d_zh', ref_3d_zh)
         self.register_buffer('ref_3d_wz', ref_3d_wz)
@@ -97,7 +97,8 @@ class bevformer_encoder(TransformerLayerSequence):
             ys = torch.linspace(0.5, H - 0.5, H, dtype=dtype,
                                 device=device).view(1, -1, 1).expand(num_points_in_pillar, H, W) / H
             ref_3d = torch.stack((xs, ys, zs), -1)  # (4, 100, 100, 3)
-            ref_3d = ref_3d.permute(1, 2, 0, 3)
+            ref_3d = ref_3d.permute(0, 3, 1, 2).flatten(2).permute(2, 0, 1)  # (HW, num_points_in_pillar, 3)
+            # ref_3d = ref_3d.permute(1, 2, 0, 3)  # (100, 100, 4, 3)
             # ref_3d = ref_3d[None].repeat(bs, 1, 1, 1)
             return ref_3d
 
@@ -162,6 +163,8 @@ class bevformer_encoder(TransformerLayerSequence):
         eps = 1e-5
         ogfH, ogfW = self.final_dim
 
+        reference_points = reference_points.clone()
+
         reference_points[..., 0:1] = reference_points[..., 0:1] * \
                                      (pc_range[3] - pc_range[0]) + pc_range[0]
         reference_points[..., 1:2] = reference_points[..., 1:2] * \
@@ -169,19 +172,19 @@ class bevformer_encoder(TransformerLayerSequence):
         reference_points[..., 2:3] = reference_points[..., 2:3] * \
                                      (pc_range[5] - pc_range[2]) + pc_range[2]
 
-        reference_points = reference_points[None, None].repeat(B, N, 1, 1, 1, 1)
-        reference_points = torch.inverse(bda).view(B, 1, 1, 1, 1, 3,
+        reference_points = reference_points[None, None].repeat(B, N, 1, 1, 1)  # (1, 6, 10000, 4, 3)
+        reference_points = torch.inverse(bda).view(B, 1, 1, 1, 3,
                                                    3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
-        reference_points -= trans.view(B, N, 1, 1, 1, 3)
+        reference_points -= trans.view(B, N, 1, 1, 3)
         combine = rots.matmul(torch.inverse(intrins)).inverse()
-        reference_points_cam = combine.view(B, N, 1, 1, 1, 3, 3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
+        reference_points_cam = combine.view(B, N, 1, 1, 3, 3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
         reference_points_cam = torch.cat([reference_points_cam[..., 0:2] / torch.maximum(
             reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps),
-                                          reference_points_cam[..., 2:3]], 5
+                                          reference_points_cam[..., 2:3]], 4
                                          )
-        reference_points_cam = post_rots.view(B, N, 1, 1, 1, 3, 3).matmul(reference_points_cam.unsqueeze(-1)).squeeze(
+        reference_points_cam = post_rots.view(B, N, 1, 1, 3, 3).matmul(reference_points_cam.unsqueeze(-1)).squeeze(
             -1)
-        reference_points_cam += post_trans.view(B, N, 1, 1, 1, 3)
+        reference_points_cam += post_trans.view(B, N, 1, 1, 3)
         reference_points_cam[..., 0] /= ogfW
         reference_points_cam[..., 1] /= ogfH
         mask = (reference_points_cam[..., 2:3] > eps)
@@ -189,11 +192,11 @@ class bevformer_encoder(TransformerLayerSequence):
                 & (reference_points_cam[..., 0:1] < (1.0 - eps))
                 & (reference_points_cam[..., 1:2] > eps)
                 & (reference_points_cam[..., 1:2] < (1.0 - eps)))
-        B, N, H, W, D, _ = reference_points_cam.shape
-        reference_points_cam = reference_points_cam.permute(1, 0, 2, 3, 4, 5).reshape(N, B, H * W, D, 3)
-        mask = mask.permute(1, 0, 2, 3, 4, 5).reshape(N, B, H * W, D, 1).squeeze(-1)
+        B, N, HW, D, _ = reference_points_cam.shape
+        reference_points_cam = reference_points_cam.permute(1, 0, 2, 3, 4).reshape(N, B, HW, D, 3)
+        mask = mask.permute(1, 0, 2, 3, 4).reshape(N, B, HW, D, 1).squeeze(-1)
 
-        return reference_points, reference_points_cam[..., :2], mask, reference_points_cam[..., 2:3]
+        return reference_points_cam[..., :2], mask, reference_points_cam[..., 2:3]
 
     @auto_fp16()
     def forward(self,
@@ -236,29 +239,15 @@ class bevformer_encoder(TransformerLayerSequence):
         output = bev_query
         intermediate = []
 
-        # ref_3d = self.get_reference_points(
-        #     tpv_h, tpv_w, self.pc_range[5] - self.pc_range[2], dim='3d', bs=bev_query.size(1), device=bev_query.device,
-        #     dtype=bev_query.dtype)
-        # ref_2d = self.get_reference_points(
-        #     tpv_h, tpv_w, dim='2d', bs=bev_query.size(1), device=bev_query.device, dtype=bev_query.dtype)
-        #
-        # ref_3d, reference_points_cam, per_cam_mask_list, bev_query_depth = self.point_sampling(
-        #     ref_3d, self.pc_range, kwargs['img_metas'], cam_params=cam_params, gt_bboxes_3d=gt_bboxes_3d)
-
         reference_points_cams, tpv_masks, bev_query_depths = [], [], []
         ref_3ds = [self.ref_3d_hw, self.ref_3d_zh, self.ref_3d_wz]
         for ref_3d in ref_3ds:
-            ref_3d, reference_points_cam, per_cam_mask_list, bev_query_depth = self.point_sampling(
+            reference_points_cam, per_cam_mask_list, bev_query_depth = self.point_sampling(
                 ref_3d, self.pc_range, kwargs['img_metas'], cam_params=cam_params, gt_bboxes_3d=gt_bboxes_3d)
-            # reference_points_cam, tpv_mask = self.point_sampling(
-            #     ref_3d, self.pc_range, kwargs['img_metas'])  # num_cam, bs, hw++, #p, 2
             reference_points_cams.append(reference_points_cam)
             tpv_masks.append(per_cam_mask_list)
             bev_query_depths.append(bev_query_depth)
 
-        # bev_query = bev_query.permute(1, 0, 2)
-        # bev_pos = bev_pos.permute(1, 0, 2)
-        # bs, len_bev, num_bev_level, _ = ref_2d.shape
         for lid, layer in enumerate(self.layers):
 
             output = layer(  # BEVFormerEncoderLayer
