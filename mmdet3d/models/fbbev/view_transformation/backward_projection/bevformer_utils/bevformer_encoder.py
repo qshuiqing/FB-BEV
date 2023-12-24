@@ -4,21 +4,17 @@
 # To view a copy of this license, visit 
 # https://github.com/NVlabs/FB-BEV/blob/main/LICENSE
 
-from .custom_base_transformer_layer import MyCustomBaseTransformerLayer
 import copy
 import warnings
-from mmcv.cnn.bricks.registry import (ATTENTION,
-                                      TRANSFORMER_LAYER,
+
+import torch
+from mmcv.cnn.bricks.registry import (TRANSFORMER_LAYER,
                                       TRANSFORMER_LAYER_SEQUENCE)
 from mmcv.cnn.bricks.transformer import TransformerLayerSequence
 from mmcv.runner import force_fp32, auto_fp16
-import numpy as np
-import torch
-import cv2 as cv
-import mmcv
-import time
-from mmcv.utils import TORCH_VERSION, digit_version
 from mmcv.utils import ext_loader
+
+from .custom_base_transformer_layer import MyCustomBaseTransformerLayer
 
 ext_module = ext_loader.load_ext(
     '_ext', ['ms_deform_attn_backward', 'ms_deform_attn_forward'])
@@ -26,7 +22,6 @@ ext_module = ext_loader.load_ext(
 
 @TRANSFORMER_LAYER_SEQUENCE.register_module()
 class bevformer_encoder(TransformerLayerSequence):
-
     """
     Attention with both self and cross
     Implements the decoder in DETR transformer.
@@ -36,7 +31,18 @@ class bevformer_encoder(TransformerLayerSequence):
             `LN`.
     """
 
-    def __init__(self, *args, pc_range=None, grid_config=None, data_config=None, return_intermediate=False, dataset_type='nuscenes', fix_bug=False,
+    def __init__(self,
+                 *args,
+                 tpv_h,
+                 tpv_w,
+                 tpv_z,
+                 pc_range=None,
+                 grid_config=None,
+                 data_config=None,
+                 num_points_in_pillar=[4, 32, 32],
+                 return_intermediate=False,
+                 dataset_type='nuscenes',
+                 fix_bug=False,
                  **kwargs):
 
         super(bevformer_encoder, self).__init__(*args, **kwargs)
@@ -49,10 +55,30 @@ class bevformer_encoder(TransformerLayerSequence):
         self.pc_range = pc_range
         self.fp16_enabled = False
 
-    def get_reference_points(self,H, W, Z=8, dim='3d', bs=1, device='cuda', dtype=torch.float):
-        """Get the reference points used in SCA and TSA.
+        ref_3d_hw = self.get_reference_points(tpv_h, tpv_w, pc_range[5] - pc_range[2], num_points_in_pillar[0], '3d',
+                                              device='cpu')
+
+        ref_3d_zh = self.get_reference_points(tpv_z, tpv_h, pc_range[3] - pc_range[0], num_points_in_pillar[1], '3d',
+                                              device='cpu')
+        ref_3d_zh = ref_3d_zh.permute(3, 0, 1, 2)[[2, 0, 1]]
+        ref_3d_zh = ref_3d_zh.permute(1, 2, 3, 0)
+
+        ref_3d_wz = self.get_reference_points(tpv_w, tpv_z, pc_range[4] - pc_range[1], num_points_in_pillar[2], '3d',
+                                              device='cpu')
+        ref_3d_wz = ref_3d_wz.permute(3, 0, 1, 2)[[1, 2, 0]]
+        ref_3d_wz = ref_3d_wz.permute(1, 2, 3, 0)
+        self.register_buffer('ref_3d_hw', ref_3d_hw)
+        self.register_buffer('ref_3d_zh', ref_3d_zh)
+        self.register_buffer('ref_3d_wz', ref_3d_wz)
+
+        ref_2d_hw = self.get_reference_points(tpv_h, tpv_w, dim='2d', bs=1, device='cpu')
+        self.register_buffer('ref_2d_hw', ref_2d_hw)
+
+    @staticmethod
+    def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim='3d', bs=1, device='cuda', dtype=torch.float):
+        """Get the reference points used in spatial cross-attn and self-attn.
         Args:
-            H, W: spatial shape of bev.
+            H, W: spatial shape of tpv plane.
             Z: hight of pillar.
             D: sample D points uniformly from each pillar.
             device (obj:`device`): The device where
@@ -64,17 +90,18 @@ class bevformer_encoder(TransformerLayerSequence):
 
         # reference points in 3D space, used in spatial cross-attention (SCA)
         if dim == '3d':
+            zs = torch.linspace(0.5, Z - 0.5, num_points_in_pillar, dtype=dtype,
+                                device=device).view(-1, 1, 1).expand(num_points_in_pillar, H, W) / Z
+            xs = torch.linspace(0.5, W - 0.5, W, dtype=dtype,
+                                device=device).view(1, 1, -1).expand(num_points_in_pillar, H, W) / W
+            ys = torch.linspace(0.5, H - 0.5, H, dtype=dtype,
+                                device=device).view(1, -1, 1).expand(num_points_in_pillar, H, W) / H
+            ref_3d = torch.stack((xs, ys, zs), -1)  # (4, 100, 100, 3)
+            ref_3d = ref_3d.permute(1, 2, 0, 3)
+            # ref_3d = ref_3d[None].repeat(bs, 1, 1, 1)
+            return ref_3d
 
-            X = torch.arange(*self.x_bound, dtype=torch.float) + self.x_bound[-1]/2
-            Y = torch.arange(*self.y_bound, dtype=torch.float) + self.y_bound[-1]/2
-            Z = torch.arange(*self.z_bound, dtype=torch.float) + self.z_bound[-1]/2
-            Y, X, Z = torch.meshgrid([Y, X, Z])
-            coords = torch.stack([X, Y, Z], dim=-1)
-            coords = coords.to(dtype).to(device)
-            # frustum = torch.cat([coords, torch.ones_like(coords[...,0:1])], dim=-1) #(x, y, z, 4)
-            return coords
-
-        # reference points on 2D bev plane, used in temporal self-attention (TSA).
+        # reference points on 2D plane, used in temporal self-attention (TSA).
         elif dim == '2d':
             ref_y, ref_x = torch.meshgrid(
                 torch.linspace(
@@ -87,47 +114,96 @@ class bevformer_encoder(TransformerLayerSequence):
             ref_2d = torch.stack((ref_x, ref_y), -1)
             ref_2d = ref_2d.repeat(bs, 1, 1).unsqueeze(2)
             return ref_2d
-    
+
+    # def get_reference_points(self, H, W, Z=8, dim='3d', bs=1, device='cuda', dtype=torch.float):
+    #     """Get the reference points used in SCA and TSA.
+    #     Args:
+    #         H, W: spatial shape of bev.
+    #         Z: hight of pillar.
+    #         D: sample D points uniformly from each pillar.
+    #         device (obj:`device`): The device where
+    #             reference_points should be.
+    #     Returns:
+    #         Tensor: reference points used in decoder, has \
+    #             shape (bs, num_keys, num_levels, 2).
+    #     """
+    #
+    #     # reference points in 3D space, used in spatial cross-attention (SCA)
+    #     if dim == '3d':
+    #
+    #         X = torch.arange(*self.x_bound, dtype=torch.float) + self.x_bound[-1] / 2
+    #         Y = torch.arange(*self.y_bound, dtype=torch.float) + self.y_bound[-1] / 2
+    #         Z = torch.arange(*self.z_bound, dtype=torch.float) + self.z_bound[-1] / 2
+    #         Y, X, Z = torch.meshgrid([Y, X, Z])
+    #         coords = torch.stack([X, Y, Z], dim=-1)
+    #         coords = coords.to(dtype).to(device)
+    #         # frustum = torch.cat([coords, torch.ones_like(coords[...,0:1])], dim=-1) #(x, y, z, 4)
+    #         return coords
+    #
+    #     # reference points on 2D bev plane, used in temporal self-attention (TSA).
+    #     elif dim == '2d':
+    #         ref_y, ref_x = torch.meshgrid(
+    #             torch.linspace(
+    #                 0.5, H - 0.5, H, dtype=dtype, device=device),
+    #             torch.linspace(
+    #                 0.5, W - 0.5, W, dtype=dtype, device=device)
+    #         )
+    #         ref_y = ref_y.reshape(-1)[None] / H
+    #         ref_x = ref_x.reshape(-1)[None] / W
+    #         ref_2d = torch.stack((ref_x, ref_y), -1)
+    #         ref_2d = ref_2d.repeat(bs, 1, 1).unsqueeze(2)
+    #         return ref_2d
+
     @force_fp32(apply_to=('reference_points', 'cam_params'))
-    def point_sampling(self, reference_points, pc_range,  img_metas, cam_params=None, gt_bboxes_3d=None):
+    def point_sampling(self, reference_points, pc_range, img_metas, cam_params=None, gt_bboxes_3d=None):
 
         rots, trans, intrins, post_rots, post_trans, bda = cam_params
         B, N, _ = trans.shape
         eps = 1e-5
         ogfH, ogfW = self.final_dim
+
+        reference_points[..., 0:1] = reference_points[..., 0:1] * \
+                                     (pc_range[3] - pc_range[0]) + pc_range[0]
+        reference_points[..., 1:2] = reference_points[..., 1:2] * \
+                                     (pc_range[4] - pc_range[1]) + pc_range[1]
+        reference_points[..., 2:3] = reference_points[..., 2:3] * \
+                                     (pc_range[5] - pc_range[2]) + pc_range[2]
+
         reference_points = reference_points[None, None].repeat(B, N, 1, 1, 1, 1)
         reference_points = torch.inverse(bda).view(B, 1, 1, 1, 1, 3,
-                          3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
+                                                   3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
         reference_points -= trans.view(B, N, 1, 1, 1, 3)
         combine = rots.matmul(torch.inverse(intrins)).inverse()
         reference_points_cam = combine.view(B, N, 1, 1, 1, 3, 3).matmul(reference_points.unsqueeze(-1)).squeeze(-1)
         reference_points_cam = torch.cat([reference_points_cam[..., 0:2] / torch.maximum(
-            reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3])*eps),  reference_points_cam[..., 2:3]], 5
-            )
-        reference_points_cam = post_rots.view(B, N, 1, 1, 1, 3, 3).matmul(reference_points_cam.unsqueeze(-1)).squeeze(-1)
-        reference_points_cam += post_trans.view(B, N, 1, 1, 1, 3) 
+            reference_points_cam[..., 2:3], torch.ones_like(reference_points_cam[..., 2:3]) * eps),
+                                          reference_points_cam[..., 2:3]], 5
+                                         )
+        reference_points_cam = post_rots.view(B, N, 1, 1, 1, 3, 3).matmul(reference_points_cam.unsqueeze(-1)).squeeze(
+            -1)
+        reference_points_cam += post_trans.view(B, N, 1, 1, 1, 3)
         reference_points_cam[..., 0] /= ogfW
         reference_points_cam[..., 1] /= ogfH
         mask = (reference_points_cam[..., 2:3] > eps)
-        mask = (mask & (reference_points_cam[..., 0:1] > eps) 
-                 & (reference_points_cam[..., 0:1] < (1.0-eps)) 
-                 & (reference_points_cam[..., 1:2] > eps) 
-                 & (reference_points_cam[..., 1:2] < (1.0-eps)))
+        mask = (mask & (reference_points_cam[..., 0:1] > eps)
+                & (reference_points_cam[..., 0:1] < (1.0 - eps))
+                & (reference_points_cam[..., 1:2] > eps)
+                & (reference_points_cam[..., 1:2] < (1.0 - eps)))
         B, N, H, W, D, _ = reference_points_cam.shape
-        reference_points_cam = reference_points_cam.permute(1, 0, 2, 3, 4, 5).reshape(N, B, H*W, D, 3)
-        mask = mask.permute(1, 0, 2, 3, 4, 5).reshape(N, B, H*W, D, 1).squeeze(-1)
+        reference_points_cam = reference_points_cam.permute(1, 0, 2, 3, 4, 5).reshape(N, B, H * W, D, 3)
+        mask = mask.permute(1, 0, 2, 3, 4, 5).reshape(N, B, H * W, D, 1).squeeze(-1)
 
         return reference_points, reference_points_cam[..., :2], mask, reference_points_cam[..., 2:3]
 
-
     @auto_fp16()
     def forward(self,
-                bev_query,
+                bev_query,  # list
                 key,
                 value,
                 *args,
-                bev_h=None,
-                bev_w=None,
+                tpv_h=None,
+                tpv_w=None,
+                tpv_z=None,
                 bev_pos=None,
                 spatial_shapes=None,
                 level_start_index=None,
@@ -160,36 +236,49 @@ class bevformer_encoder(TransformerLayerSequence):
         output = bev_query
         intermediate = []
 
-        ref_3d = self.get_reference_points(
-            bev_h, bev_w, self.pc_range[5]-self.pc_range[2], dim='3d', bs=bev_query.size(1),  device=bev_query.device, dtype=bev_query.dtype)
-        ref_2d = self.get_reference_points(
-            bev_h, bev_w, dim='2d', bs=bev_query.size(1), device=bev_query.device, dtype=bev_query.dtype)
+        # ref_3d = self.get_reference_points(
+        #     tpv_h, tpv_w, self.pc_range[5] - self.pc_range[2], dim='3d', bs=bev_query.size(1), device=bev_query.device,
+        #     dtype=bev_query.dtype)
+        # ref_2d = self.get_reference_points(
+        #     tpv_h, tpv_w, dim='2d', bs=bev_query.size(1), device=bev_query.device, dtype=bev_query.dtype)
+        #
+        # ref_3d, reference_points_cam, per_cam_mask_list, bev_query_depth = self.point_sampling(
+        #     ref_3d, self.pc_range, kwargs['img_metas'], cam_params=cam_params, gt_bboxes_3d=gt_bboxes_3d)
 
-        ref_3d, reference_points_cam, per_cam_mask_list, bev_query_depth = self.point_sampling(
-            ref_3d, self.pc_range, kwargs['img_metas'], cam_params=cam_params, gt_bboxes_3d=gt_bboxes_3d)
+        reference_points_cams, tpv_masks, bev_query_depths = [], [], []
+        ref_3ds = [self.ref_3d_hw, self.ref_3d_zh, self.ref_3d_wz]
+        for ref_3d in ref_3ds:
+            ref_3d, reference_points_cam, per_cam_mask_list, bev_query_depth = self.point_sampling(
+                ref_3d, self.pc_range, kwargs['img_metas'], cam_params=cam_params, gt_bboxes_3d=gt_bboxes_3d)
+            # reference_points_cam, tpv_mask = self.point_sampling(
+            #     ref_3d, self.pc_range, kwargs['img_metas'])  # num_cam, bs, hw++, #p, 2
+            reference_points_cams.append(reference_points_cam)
+            tpv_masks.append(per_cam_mask_list)
+            bev_query_depths.append(bev_query_depth)
 
-        bev_query = bev_query.permute(1, 0, 2)
-        bev_pos = bev_pos.permute(1, 0, 2)
-        bs, len_bev, num_bev_level, _ = ref_2d.shape
+        # bev_query = bev_query.permute(1, 0, 2)
+        # bev_pos = bev_pos.permute(1, 0, 2)
+        # bs, len_bev, num_bev_level, _ = ref_2d.shape
         for lid, layer in enumerate(self.layers):
-           
-            output = layer(
+
+            output = layer(  # BEVFormerEncoderLayer
                 bev_query,
                 key,
                 value,
                 *args,
                 bev_pos=bev_pos,
-                ref_2d=ref_2d,
-                ref_3d=ref_3d,
-                bev_h=bev_h,
-                bev_w=bev_w,
+                ref_2d=self.ref_2d_hw,
+                ref_3d=ref_3ds,  # unsued
+                tpv_h=tpv_h,
+                tpv_w=tpv_w,
+                tpv_z=tpv_z,
                 prev_bev=prev_bev,
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
-                reference_points_cam=reference_points_cam,
-                per_cam_mask_list=per_cam_mask_list,
+                reference_points_cam=reference_points_cams,
+                per_cam_mask_list=tpv_masks,
                 bev_mask=bev_mask,
-                bev_query_depth=bev_query_depth,
+                bev_query_depth=bev_query_depths[0],
                 pred_img_depth=pred_img_depth,
                 **kwargs)
 
@@ -260,8 +349,11 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
                 key_padding_mask=None,
                 ref_2d=None,
                 ref_3d=None,
-                bev_h=None,
-                bev_w=None,
+                # bev_h=None,
+                # bev_w=None,
+                tpv_h=None,
+                tpv_w=None,
+                tpv_z=None,
                 reference_points_cam=None,
                 mask=None,
                 spatial_shapes=None,
@@ -272,7 +364,7 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
                 bev_query_depth=None,
                 per_cam_mask_list=None,
                 lidar_bev=None,
-                pred_img_depth=None, 
+                pred_img_depth=None,
                 **kwargs):
         """Forward function for `TransformerDecoderLayer`.
 
@@ -321,25 +413,26 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
             assert len(attn_masks) == self.num_attn, f'The length of ' \
                                                      f'attn_masks {len(attn_masks)} must be equal ' \
                                                      f'to the number of attention in ' \
-                f'operation_order {self.num_attn}'
+                                                     f'operation_order {self.num_attn}'
         for layer in self.operation_order:
             # temporal self attention
             if layer == 'self_attn':
-                query = self.attentions[attn_index](
-                    query,
+                query_0 = self.attentions[attn_index](
+                    query[0],
                     None,
                     None,
                     identity if self.pre_norm else None,
-                    query_pos=bev_pos,
-                    key_pos=bev_pos,
+                    query_pos=bev_pos[0],
+                    key_pos=bev_pos[0],
                     attn_mask=attn_masks[attn_index],
                     key_padding_mask=bev_mask,
                     reference_points=ref_2d,
                     spatial_shapes=torch.tensor(
-                        [[bev_h, bev_w]], device=query.device),
-                    level_start_index=torch.tensor([0], device=query.device),
+                        [[tpv_h, tpv_w]], device=query[0].device),
+                    level_start_index=torch.tensor([0], device=query[0].device),
                     **kwargs)
                 attn_index += 1
+                query = torch.cat([query_0, query[1], query[2]], dim=1)
                 identity = query
 
             elif layer == 'norm':
@@ -348,7 +441,7 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
 
             # spaital cross attention
             elif layer == 'cross_attn':
-                query = self.attentions[attn_index](
+                query = self.attentions[attn_index](  # DA_SpatialCrossAttention
                     query,
                     key,
                     value,
@@ -373,6 +466,5 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
                 query = self.ffns[ffn_index](
                     query, identity if self.pre_norm else None)
                 ffn_index += 1
-
+        query = torch.split(query, [tpv_h * tpv_w, tpv_z * tpv_h, tpv_w * tpv_z], dim=1)
         return query
-

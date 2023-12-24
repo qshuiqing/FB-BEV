@@ -34,8 +34,11 @@ class BEVFormer(BaseModule):
                  in_channels=64,
                  out_channels=64,
                  use_zero_embedding=False,
-                 bev_h=30,
-                 bev_w=30,
+                 # bev_h=30,
+                 # bev_w=30,
+                 tpv_h=None,
+                 tpv_w=None,
+                 tpv_z=None,
                  num_cams=6,
                  encoder=None,
                  embed_dims=256,
@@ -44,8 +47,11 @@ class BEVFormer(BaseModule):
                  **kwargs):
         super(BEVFormer, self).__init__(**kwargs)
 
-        self.bev_h = bev_h
-        self.bev_w = bev_w
+        # self.bev_h = bev_h
+        # self.bev_w = bev_w
+        self.tpv_h = tpv_h
+        self.tpv_w = tpv_w
+        self.tpv_z = tpv_z
         self.fp16_enabled = False
         self.pc_range = pc_range
         self.use_zero_embedding = use_zero_embedding
@@ -63,15 +69,11 @@ class BEVFormer(BaseModule):
 
         self.use_cams_embeds = use_cams_embeds
 
-        self.init_layers()
-
-    def init_layers(self):
-        """Initialize layers of the Detr3DTransformer."""
         self.cams_embeds = nn.Parameter(
             torch.Tensor(self.num_cams, self.embed_dims))
-
-        self.bev_embedding = nn.Embedding(
-            self.bev_h * self.bev_w, self.embed_dims)
+        self.tpv_embedding_hw = nn.Embedding(self.tpv_h * self.tpv_w, self.embed_dims)
+        self.tpv_embedding_zh = nn.Embedding(self.tpv_z * self.tpv_h, self.embed_dims)
+        self.tpv_embedding_wz = nn.Embedding(self.tpv_w * self.tpv_z, self.embed_dims)
 
     def init_weights(self):
         """Initialize the transformer weights."""
@@ -105,18 +107,23 @@ class BEVFormer(BaseModule):
         dtype = mlvl_feats[0].dtype
         device = mlvl_feats[0].device
 
-        bev_queries = self.bev_embedding.weight.to(dtype)
-        bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
+        # tpv queries and pos embeds
+        tpv_queries_hw = self.tpv_embedding_hw.weight.to(dtype)
+        tpv_queries_zh = self.tpv_embedding_zh.weight.to(dtype)
+        tpv_queries_wz = self.tpv_embedding_wz.weight.to(dtype)
+        tpv_queries_hw = tpv_queries_hw.unsqueeze(0).repeat(bs, 1, 1)  # (bs, num_query, c)
+        tpv_queries_zh = tpv_queries_zh.unsqueeze(0).repeat(bs, 1, 1)
+        tpv_queries_wz = tpv_queries_wz.unsqueeze(0).repeat(bs, 1, 1)
 
         if lss_bev is not None:
-            lss_bev = lss_bev.flatten(2).permute(2, 0, 1)  # (hw, bs, c)
-            bev_queries = bev_queries + lss_bev
+            lss_bev = lss_bev.flatten(2).permute(0, 2, 1)  # (hw, bs, c)
+            tpv_queries_hw = tpv_queries_hw + lss_bev
 
         if bev_mask is not None:
             bev_mask = bev_mask.reshape(bs, -1)
 
-        bev_pos = self.positional_encoding(bs, self.bev_h, self.bev_w, device).to(dtype)
-        bev_pos = bev_pos.flatten(2).permute(2, 0, 1)
+        bev_pos = self.positional_encoding(bs, self.tpv_h, self.tpv_w, device).to(dtype)
+        bev_pos = bev_pos.flatten(2).permute(0, 2, 1)
 
         feat_flatten = []
         spatial_shapes = []
@@ -140,12 +147,13 @@ class BEVFormer(BaseModule):
         feat_flatten = feat_flatten.permute(0, 2, 1, 3)  # (num_cam, H*W, bs, embed_dims)
 
         bev_embed = self.encoder(
-            bev_queries,
+            [tpv_queries_hw, tpv_queries_zh, tpv_queries_wz],
             feat_flatten,
             feat_flatten,
-            bev_h=self.bev_h,
-            bev_w=self.bev_w,
-            bev_pos=bev_pos,
+            tpv_h=self.tpv_h,
+            tpv_w=self.tpv_w,
+            tpv_z=self.tpv_z,
+            bev_pos=[bev_pos, None, None],
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             cam_params=cam_params,
