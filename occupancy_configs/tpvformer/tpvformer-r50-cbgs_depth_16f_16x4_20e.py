@@ -274,20 +274,20 @@ occupancy_path = 'data/nuscenes/gts'
 
 train_pipeline = [
     dict(
-        type='PrepareImageInputs', #img ,post rot(img aug) , rot(sensor2keyego)
+        type='PrepareImageInputs',
         is_train=True,
         data_config=data_config),
     dict(
-        type='LoadAnnotationsBEVDepth', #bda(bev aug)
+        type='LoadAnnotationsBEVDepth',
         bda_aug_conf=bda_aug_conf,
         classes=class_names),
     dict(
-        type='LoadPointsFromFile', #coord_type='LIDAR'
+        type='LoadPointsFromFile',
         coord_type='LIDAR',
         load_dim=5,
         use_dim=5,
         file_client_args=file_client_args),
-    dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config), #把雷达点从雷达坐标系转换到图像坐标系，前两位是坐标，后一位是深度，得到每个像素点的对应深度值（深度图，gt_depth）
+    dict(type='PointToMultiViewDepth', downsample=1, grid_config=grid_config),
     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='ObjectNameFilter', classes=class_names),
     dict(type='LoadOccupancy', ignore_nonvisible=True, fix_void=fix_void, occupancy_path=occupancy_path),
@@ -372,7 +372,7 @@ for key in ['val', 'test']:
     data[key].update(share_data_config)
 
 # Optimizer
-lr = 2e-4 * 0.75
+lr = 2e-4
 optimizer = dict(type='AdamW', lr=lr, weight_decay=1e-2)
 
 optimizer_config = dict(grad_clip=dict(max_norm=5, norm_type=2))
