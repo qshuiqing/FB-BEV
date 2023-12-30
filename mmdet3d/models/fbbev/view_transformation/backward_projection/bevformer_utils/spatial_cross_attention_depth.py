@@ -177,7 +177,7 @@ class DA_SpatialCrossAttention(BaseModule):
         if query_pos is not None:
             query = query + query_pos
         bs, num_query, _ = query.size()
-        D = reference_points_cam.size(3)
+        D = reference_points_cam.size(3) #2d点深度
         indexes = [[] for _ in range(bs)]
         if bev_mask is not None:
             per_cam_mask_list_ = per_cam_mask_list & bev_mask[None, :, :, None]
@@ -190,7 +190,7 @@ class DA_SpatialCrossAttention(BaseModule):
                 if len(index_query_per_img) == 0:
                     index_query_per_img = per_cam_mask_list[i][j].sum(-1).nonzero().squeeze(-1)[0:1]
                 indexes[j].append(index_query_per_img)
-                max_len = max(max_len, len(index_query_per_img))
+                max_len = max(max_len, len(index_query_per_img)) #每个图片对应的合法的query的index
         # each camera only interacts with its corresponding BEV queries. This step can  greatly save GPU memory.
         queries_rebatch = query.new_zeros(
             [bs, self.num_cams, max_len, self.embed_dims])

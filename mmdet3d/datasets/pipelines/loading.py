@@ -184,9 +184,9 @@ class LoadOccupancy(object):
 
 
         occupancy_file_path = osp.join(self.occupancy_path, scene_name, sample_token, 'labels.npz')
-        data = np.load(occupancy_file_path)
-        occupancy = torch.tensor(data['semantics'])
-        visible_mask = torch.tensor(data[self.mask])
+        data = np.load(occupancy_file_path) #semantics ,mask_lidar ,mask_camera
+        occupancy = torch.tensor(data['semantics']) #0到17
+        visible_mask = torch.tensor(data[self.mask]) #mask_camera
         # visible_mask_lidar = data['mask_lidar']
 
         if self.ignore_nonvisible:
@@ -200,8 +200,8 @@ class LoadOccupancy(object):
         occupancy = occupancy.permute(1, 2, 0)
 
         
-        if self.fix_void:
-            occupancy[occupancy<255] = occupancy[occupancy<255] + 1
+        if self.fix_void: #19
+            occupancy[occupancy<255] = occupancy[occupancy<255] + 1  #1到18
 
         for class_ in self.ignore_classes:
             occupancy[occupancy==class_] = 255
@@ -526,7 +526,7 @@ class LoadPointsFromFile(object):
     """
 
     def __init__(self,
-                 coord_type,
+                 coord_type,#LIDAR
                  load_dim=6,
                  use_dim=[0, 1, 2],
                  shift_height=False,
@@ -601,7 +601,7 @@ class LoadPointsFromFile(object):
 
         attribute_dims = None
 
-        if self.shift_height:
+        if self.shift_height:#false
             floor_height = np.percentile(points[:, 2], 0.99)
             height = points[:, 2] - floor_height
             points = np.concatenate(
@@ -609,7 +609,7 @@ class LoadPointsFromFile(object):
                  np.expand_dims(height, 1), points[:, 3:]], 1)
             attribute_dims = dict(height=3)
 
-        if self.use_color:
+        if self.use_color:#false
             assert len(self.use_dim) >= 6
             if attribute_dims is None:
                 attribute_dims = dict()
@@ -620,7 +620,7 @@ class LoadPointsFromFile(object):
                     points.shape[1] - 1,
                 ]))
 
-        points_class = get_points_type(self.coord_type)
+        points_class = get_points_type(self.coord_type)  #coord_type = LIDAR
         points = points_class(
             points, points_dim=points.shape[-1], attribute_dims=attribute_dims)
 
@@ -881,11 +881,11 @@ class PointToMultiViewDepth(object):
         self.grid_config = grid_config
 
     def points2depthmap(self, points, height, width):
-        height, width = height // self.downsample, width // self.downsample
+        height, width = height // self.downsample, width // self.downsample #downsample=1
         depth_map = torch.zeros((height, width), dtype=torch.float32)
         coor = torch.round(points[:, :2] / self.downsample)
         depth = points[:, 2]
-        kept1 = (coor[:, 0] >= 0) & (coor[:, 0] < width) & (
+        kept1 = (coor[:, 0] >= 0) & (coor[:, 0] < width) & ( #筛选范围内的点
             coor[:, 1] >= 0) & (coor[:, 1] < height) & (
                 depth < self.grid_config['depth'][1]) & (
                     depth >= self.grid_config['depth'][0])
@@ -896,18 +896,18 @@ class PointToMultiViewDepth(object):
         coor, depth, ranks = coor[sort], depth[sort], ranks[sort]
 
 
-        kept2 = torch.ones(coor.shape[0], device=coor.device, dtype=torch.bool)
+        kept2 = torch.ones(coor.shape[0], device=coor.device, dtype=torch.bool) #筛选不重复的点
         kept2[1:] = (ranks[1:] != ranks[:-1])
         coor, depth = coor[kept2], depth[kept2]
 
 
         coor = coor.to(torch.long)
-        depth_map[coor[:, 1], coor[:, 0]] = depth
+        depth_map[coor[:, 1], coor[:, 0]] = depth #将点的深度值赋给深度图的对应位置
      
         return depth_map
 
     def __call__(self, results):
-        points_lidar = results['points']
+        points_lidar = results['points'] #lidar坐标系下的点
         imgs, rots, trans, intrins = results['img_inputs'][:4]
         post_rots, post_trans, bda = results['img_inputs'][4:]
         depth_map_list = []
@@ -945,15 +945,15 @@ class PointToMultiViewDepth(object):
             cam2img = torch.from_numpy(cam2img)
             cam2img[:3, :3] = intrins[cid]
 
-            lidar2cam = torch.inverse(camego2global.matmul(cam2camego)).matmul(lidarego2global)
+            lidar2cam = torch.inverse(camego2global.matmul(cam2camego)).matmul(lidarego2global) #先用每个camego求每个cam到global,再用global求lidar到每个cam（雷达坐标系到相机坐标系）
             # lidarego2global.matmul(lidar2lidarego))
-            lidar2img = cam2img.matmul(lidar2cam)
-            points_img = points_lidar.tensor[:, :3].matmul(
+            lidar2img = cam2img.matmul(lidar2cam)#求lidar到每个相机的img的转换（雷达坐标系到）
+            points_img = points_lidar.tensor[:, :3].matmul( #把雷达点从lidar坐标系转到图像坐标系
                 lidar2img[:3, :3].T) + lidar2img[:3, 3].unsqueeze(0)
             points_img = torch.cat(
                 [points_img[:, :2] / points_img[:, 2:3], points_img[:, 2:3]],
                 1)
-            points_img = points_img.matmul(
+            points_img = points_img.matmul(  #图像坐标系下的雷达点做图片增强
                 post_rots[cid].T) + post_trans[cid:cid + 1, :]
             depth_map = self.points2depthmap(points_img, imgs.shape[2],
                                              imgs.shape[3])  
@@ -1185,7 +1185,7 @@ class PrepareImageInputs(object):
 
     def get_inputs(self, results, scale=None):
         imgs = []
-        rots = []
+        rots = [] #六个相机 到 前视相机对应的ego
         trans = []
         intrins = []
         post_rots = []
@@ -1375,7 +1375,7 @@ class LoadAnnotationsBEVDepth(object):
         gt_boxes, gt_labels = results['ann_infos']
         gt_boxes, gt_labels = torch.Tensor(np.array(gt_boxes)), torch.tensor(np.array(gt_labels))
         tta_confg = results.get('tta_config', None)
-        rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation(tta_confg
+        rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation(tta_confg  #随机得到bev增强的变换
         )
         bda_mat = torch.zeros(4, 4)
         bda_mat[3, 3] = 1

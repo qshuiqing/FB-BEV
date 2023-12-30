@@ -166,7 +166,7 @@ def parse_args():
     return args
 
 
-def load_json_logs(json_logs):
+def load_json_logs(json_logs, mode):
     # load and convert json_logs to log_dict, key is epoch, value is a sub dict
     # keys of sub dict is different metrics, e.g. memory, bbox_mAP
     # value of sub dict is a list of corresponding values of all iterations
@@ -177,6 +177,8 @@ def load_json_logs(json_logs):
                 log = json.loads(line.strip())
                 # skip lines without `epoch` field
                 if 'epoch' not in log:
+                    continue
+                if log['mode'] != mode:
                     continue
                 epoch = log.pop('epoch')
                 if epoch not in log_dict:
@@ -193,7 +195,7 @@ def main():
     for json_log in json_logs:
         assert json_log.endswith('.json')
 
-    log_dicts = load_json_logs(json_logs)
+    log_dicts = load_json_logs(json_logs, args.mode)
 
     eval(args.task)(log_dicts, args)
 

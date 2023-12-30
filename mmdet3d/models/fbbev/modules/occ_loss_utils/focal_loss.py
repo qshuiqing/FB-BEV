@@ -234,7 +234,7 @@ class CustomFocalLoss(nn.Module):
 
         num_classes = pred.size(1)
         pred = pred.permute(0, 2, 3, 4, 1).reshape(-1, num_classes)[visible_mask]
-        target = target.reshape(-1)[visible_mask]
+        target = target.reshape(-1)[visible_mask]  #target取值 2到18
         
         assert reduction_override in (None, 'none', 'mean', 'sum')
         reduction = (

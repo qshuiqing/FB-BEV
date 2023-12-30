@@ -173,11 +173,11 @@ class CustomResNet3D(BaseModule):
         self.plane2voxel = plane2voxel
         
             
-        layers = layer_metas[depth]
+        layers = layer_metas[depth] #depth18  [2, 2, 2, 2]
         self.use_spase_3dtensor = use_spase_3dtensor
-        block_inplanes = [int(x * widen_factor) for x in block_inplanes]
-        self.in_planes = block_inplanes[0]
-        self.out_indices = out_indices
+        block_inplanes = [int(x * widen_factor) for x in block_inplanes] #[64, 64 * 2, 64 * 4]
+        self.in_planes = block_inplanes[0] #64
+        self.out_indices = out_indices #0,1,2
         
         # replace the first several downsampling layers with the channel-squeeze layers
         Conv3d = nn.Conv3d if not self.use_spase_3dtensor else spconv.SubMConv3d
@@ -186,15 +186,15 @@ class CustomResNet3D(BaseModule):
             norm_cfg['type'] = 'BN1d'
 
         self.input_proj = Sequential(
-            Conv3d(n_input_channels, self.in_planes, kernel_size=(1, 1, 1),
+            Conv3d(n_input_channels, self.in_planes, kernel_size=(1, 1, 1), #入参80维 出参64维
                       stride=(1, 1, 1), bias=False),
             build_norm_layer(norm_cfg, self.in_planes)[1],
             nn.ReLU(inplace=True),
         )
         
         self.layers = nn.ModuleList()
-        for i in range(len(block_inplanes)):
-            self.layers.append(self._make_layer(block, block_inplanes[i], layers[i], 
+        for i in range(len(block_inplanes)): #三层 [64, 64 * 2, 64 * 4]
+            self.layers.append(self._make_layer(block, block_inplanes[i], layers[i],   # layers =[2,2,2,2]
                                 shortcut_type, block_strides[i], norm_cfg=norm_cfg))
 
         for m in self.modules():
@@ -250,10 +250,10 @@ class CustomResNet3D(BaseModule):
     def forward(self, x):
         if self.plane2voxel is not None:
             x = x.unsqueeze(-1).repeat(1, 1, 1, 1, self.plane2voxel)
-        x = self.input_proj(x)
+        x = self.input_proj(x) #入80出64维
         res = []
         for index, layer in enumerate(self.layers):
-            if self.use_spase_3dtensor:
+            if self.use_spase_3dtensor:#false
                 for block in layer:
                     if self.with_cp:
                         x = cp(block, x)
@@ -265,8 +265,8 @@ class CustomResNet3D(BaseModule):
                 else:
                     x = layer(x)
             
-            if index in self.out_indices:
-                if self.use_spase_3dtensor:
+            if index in self.out_indices: #0,1,2
+                if self.use_spase_3dtensor:#false
                     res.append(x.dense())
                 else:
                     res.append(x)

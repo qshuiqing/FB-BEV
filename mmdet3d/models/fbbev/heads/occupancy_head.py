@@ -117,7 +117,7 @@ class OccHead(BaseModule):
         if balance_cls_weight:
             if out_channel == 19:
                 self.class_weights = torch.from_numpy(1 / np.log(nusc_class_frequencies[:out_channel] + 0.001))
-                self.class_weights = torch.cat([torch.tensor([0]), self.class_weights])
+                self.class_weights = torch.cat([torch.tensor([0]), self.class_weights]) #第0位的权重是0
             else:
                 if out_channel == 17: nusc_class_frequencies[0] += nusc_class_frequencies[-1]
                 self.class_weights = torch.from_numpy(1 / np.log(nusc_class_frequencies[:out_channel] + 0.001))

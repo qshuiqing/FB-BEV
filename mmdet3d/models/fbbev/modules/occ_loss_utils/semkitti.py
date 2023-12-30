@@ -113,7 +113,7 @@ def sem_scal_loss(pred_, ssc_target, ignore_index=255):
         count = 0
         mask = ssc_target != ignore_index
         n_classes = pred.shape[1]
-        begin = 1 if n_classes == 19 else 0
+        begin = 1 if n_classes == 19 else 0  #从第1位开始计算，第0位不参与计算
         for i in range(begin, n_classes-1):   
 
             # Get probability of class i

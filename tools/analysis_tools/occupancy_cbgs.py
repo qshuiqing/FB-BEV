@@ -27,7 +27,7 @@ embed()
 exit()
 new_json_map = {}
 
-for key in json_map.keys()
+for key in json_map.keys():
     new_json_map[key] = {}
     for k, v in json_map[key].items():
         new_json_map[key][int(k)] = int(v)
