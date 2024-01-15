@@ -325,7 +325,7 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
         for layer in self.operation_order:
             # temporal self attention
             if layer == 'self_attn':
-                query = self.attentions[attn_index](
+                query = self.attentions[attn_index](  # MultiScaleDeformableAttention
                     query,
                     None,
                     None,
@@ -348,7 +348,7 @@ class BEVFormerEncoderLayer(MyCustomBaseTransformerLayer):
 
             # spaital cross attention
             elif layer == 'cross_attn':
-                query = self.attentions[attn_index](
+                query = self.attentions[attn_index](  # DA_SpatialCrossAttention
                     query,
                     key,
                     value,
