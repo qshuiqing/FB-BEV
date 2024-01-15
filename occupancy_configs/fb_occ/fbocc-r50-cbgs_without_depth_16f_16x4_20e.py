@@ -8,7 +8,7 @@
 # we follow the online training settings  from solofusion
 num_gpus = 1
 samples_per_gpu = 3
-num_iters_per_epoch = int(28130 // num_gpus * samples_per_gpu)
+num_iters_per_epoch = int(28130 // (num_gpus * samples_per_gpu))
 num_epochs = 20
 checkpoint_epoch_interval = 1
 use_custom_eval_hook=True
