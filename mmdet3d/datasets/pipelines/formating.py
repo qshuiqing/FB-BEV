@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import numpy as np
 from mmcv.parallel import DataContainer as DC
+from mmdet.datasets.pipelines import to_tensor
 
 from mmdet3d.core.bbox import BaseInstance3DBoxes
 from mmdet3d.core.points import BasePoints
-from mmdet.datasets.pipelines import to_tensor
 from ..builder import PIPELINES
 
 
@@ -49,9 +49,9 @@ class DefaultFormatBundle(object):
                 img = np.ascontiguousarray(results['img'].transpose(2, 0, 1))
                 results['img'] = DC(to_tensor(img), stack=True)
         for key in [
-                'proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels',
-                'gt_labels_3d', 'attr_labels', 'pts_instance_mask',
-                'pts_semantic_mask', 'centers2d', 'depths'
+            'proposals', 'gt_bboxes', 'gt_bboxes_ignore', 'gt_labels',
+            'gt_labels_3d', 'attr_labels', 'pts_instance_mask',
+            'pts_semantic_mask', 'centers2d', 'depths'
         ]:
             if key not in results:
                 continue
@@ -129,18 +129,19 @@ class Collect3D(object):
     """
 
     def __init__(
-        self,
-        keys,
-        meta_keys=('filename', 'ori_shape', 'img_shape', 'lidar2img',
-                   'depth2img', 'cam2img', 'pad_shape', 'scale_factor', 'flip',
-                   'pcd_horizontal_flip', 'pcd_vertical_flip', 'box_mode_3d',
-                   'box_type_3d', 'img_norm_cfg', 'pcd_trans', 'sample_idx',
-                   'pcd_scale_factor', 'pcd_rotation', 'pcd_rotation_angle',
-                   'pts_filename', 'transformation_3d_flow', 'trans_mat', 'index',
-                   'sequence_group_idx', 'curr_to_prev_lidar_rt', 'curr_to_prev_ego_rt',
-                    'start_of_sequence', 'index', 'global_to_curr_lidar_rt', 'tta_config',
-                    'prev_lidar_to_global_rt', 'sample_index', 'scene_name', 'curr', 'nuscenes_get_rt_matrix', 'aux_cam_params',
-                   'affine_aug')):
+            self,
+            keys,
+            meta_keys=('filename', 'ori_shape', 'img_shape', 'lidar2img', 'origin', 'bda_mat',
+                       'depth2img', 'cam2img', 'pad_shape', 'scale_factor', 'flip', 'ego2lidar',
+                       'pcd_horizontal_flip', 'pcd_vertical_flip', 'box_mode_3d',
+                       'box_type_3d', 'img_norm_cfg', 'pcd_trans', 'sample_idx',
+                       'pcd_scale_factor', 'pcd_rotation', 'pcd_rotation_angle',
+                       'pts_filename', 'transformation_3d_flow', 'trans_mat', 'index',
+                       'sequence_group_idx', 'curr_to_prev_lidar_rt', 'curr_to_prev_ego_rt',
+                       'start_of_sequence', 'index', 'global_to_curr_lidar_rt', 'tta_config',
+                       'prev_lidar_to_global_rt', 'sample_index', 'scene_name', 'curr', 'nuscenes_get_rt_matrix',
+                       'aux_cam_params',
+                       'affine_aug')):
         self.keys = keys
         self.meta_keys = meta_keys
 
@@ -250,7 +251,7 @@ class DefaultFormatBundle3D(DefaultFormatBundle):
                     results['gt_labels'] = np.array([
                         self.class_names.index(n) for n in results['gt_names']
                     ],
-                                                    dtype=np.int64)
+                        dtype=np.int64)
                 # we still assume one pipeline for one frame LiDAR
                 # thus, the 3D name is list[string]
                 if 'gt_names_3d' in results:
@@ -258,7 +259,7 @@ class DefaultFormatBundle3D(DefaultFormatBundle):
                         self.class_names.index(n)
                         for n in results['gt_names_3d']
                     ],
-                                                       dtype=np.int64)
+                        dtype=np.int64)
         results = super(DefaultFormatBundle3D, self).__call__(results)
         return results
 

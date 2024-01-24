@@ -1,43 +1,41 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
+import os.path as osp
+
 import mmcv
 import numpy as np
 import torch
 from PIL import Image
+from mmdet.datasets.pipelines import LoadAnnotations
 from pyquaternion import Quaternion
-import os.path as osp
-from mmdet3d.core.points import BasePoints, get_points_type
-from mmdet.datasets.pipelines import LoadAnnotations, LoadImageFromFile
-from ...core.bbox import LiDARInstance3DBoxes
-from ..builder import PIPELINES
-from copy import deepcopy
-import cv2
-import os
 from torchvision.transforms.functional import rotate
 
+from mmdet3d.core.points import BasePoints, get_points_type
+from ..builder import PIPELINES
+from ...core.bbox import LiDARInstance3DBoxes
 
 
 @PIPELINES.register_module()
 class LoadSemanticImageMask(object):
     def __init__(self, mask_file_path='./data/nus_sem'):
         self.mask_file_path = mask_file_path
-    
+
     def __call__(self, results):
 
         masks = []
         for cam in results['cam_names']:
             data_token = results['curr']['cams'][cam]['sample_data_token']
-            filename = osp.join(self.mask_file_path, data_token+'.png')
+            filename = osp.join(self.mask_file_path, data_token + '.png')
             img = Image.open(filename)
             img_augs = results['img_augs'][cam]
-            resize, resize_dims, crop, flip, rotate = img_augs        
+            resize, resize_dims, crop, flip, rotate = img_augs
             img = self.img_transform_core(img, resize_dims, crop, flip, rotate)
             img = np.array(img)
             masks.append(img)
         masks = np.stack(masks, 0)
         results['gt_img_sem_masks'] = torch.from_numpy(masks)
         return results
-        
-    
+
     def img_transform_core(self, img, resize_dims, crop, flip, rotate):
         # adjust image
         img = img.resize(resize_dims, resample=0)
@@ -123,7 +121,6 @@ class LoadImageFromFileMono3D(object):
             :class:`LoadImageFromFile`.
     """
 
-
     def __call__(self, results):
         """Call functions to load image and get image meta information.
 
@@ -138,11 +135,6 @@ class LoadImageFromFileMono3D(object):
         return results
 
 
-
-
-
-import torch.nn as nn
-
 @PIPELINES.register_module()
 class LoadOccupancy(object):
     """Load an image from file in monocular 3D object detection. Compared to 2D
@@ -154,20 +146,19 @@ class LoadOccupancy(object):
     """
 
     def __init__(self, occupancy_path='/mount/dnn_data/occupancy_2023/gts',
-                    num_classes=17,
-                    ignore_nonvisible=False,
-                    mask='mask_camera',
-                    ignore_classes=[],
-                    fix_void=True) :
+                 num_classes=17,
+                 ignore_nonvisible=False,
+                 mask='mask_camera',
+                 ignore_classes=[],
+                 fix_void=True):
         self.occupancy_path = occupancy_path
         self.num_classes = num_classes
         self.ignore_nonvisible = ignore_nonvisible
         self.mask = mask
 
-        self.ignore_classes=ignore_classes
+        self.ignore_classes = ignore_classes
 
         self.fix_void = fix_void
-
 
     def __call__(self, results):
         """Call functions to load image and get image meta information.
@@ -182,7 +173,6 @@ class LoadOccupancy(object):
         scene_name = results['curr']['scene_name']
         sample_token = results['curr']['token']
 
-
         occupancy_file_path = osp.join(self.occupancy_path, scene_name, sample_token, 'labels.npz')
         data = np.load(occupancy_file_path)
         occupancy = torch.tensor(data['semantics'])
@@ -192,19 +182,17 @@ class LoadOccupancy(object):
         if self.ignore_nonvisible:
             occupancy[~visible_mask.to(torch.bool)] = 255
 
-
         # to BEVDet format
         occupancy = occupancy.permute(2, 0, 1)
         occupancy = torch.rot90(occupancy, 1, [1, 2])
         occupancy = torch.flip(occupancy, [1])
         occupancy = occupancy.permute(1, 2, 0)
 
-        
         if self.fix_void:
-            occupancy[occupancy<255] = occupancy[occupancy<255] + 1
+            occupancy[occupancy < 255] = occupancy[occupancy < 255] + 1
 
         for class_ in self.ignore_classes:
-            occupancy[occupancy==class_] = 255
+            occupancy[occupancy == class_] = 255
 
         if results['rotate_bda'] != 0:
             occupancy = occupancy.permute(2, 0, 1)
@@ -216,12 +204,10 @@ class LoadOccupancy(object):
         if results['flip_dy']:
             occupancy = torch.flip(occupancy, [0])
 
-
-
         results['gt_occupancy'] = occupancy
         results['visible_mask'] = visible_mask
-        
-        results['visible_mask_bev'] = (occupancy==255).sum(-1)
+
+        results['visible_mask_bev'] = (occupancy == 255).sum(-1)
 
         return results
 
@@ -277,7 +263,7 @@ class LoadPointsFromMultiSweeps(object):
         assert max(use_dim) < load_dim, \
             f'Expect all used dimensions < {load_dim}, got {use_dim}'
         self.translate2ego = translate2ego
-        
+
     def _load_points(self, pts_filename):
         """Private function to load point clouds data.
 
@@ -374,10 +360,11 @@ class LoadPointsFromMultiSweeps(object):
         if self.translate2ego:
             lidar2lidarego = np.eye(4, dtype=np.float32)
             lidar2lidarego[:3, :3] = Quaternion(
-            results['curr']['lidar2ego_rotation']).rotation_matrix
+                results['curr']['lidar2ego_rotation']).rotation_matrix
             lidar2lidarego[:3, 3] = results['curr']['lidar2ego_translation']
             lidar2lidarego = torch.from_numpy(lidar2lidarego)
-            results['points'].tensor[:, :3]  = results['points'].tensor[:, :3].matmul(lidar2lidarego[:3, :3].T) + lidar2lidarego[:3, 3]
+            results['points'].tensor[:, :3] = results['points'].tensor[:, :3].matmul(
+                lidar2lidarego[:3, :3].T) + lidar2lidarego[:3, 3]
         return results
 
     def __repr__(self):
@@ -387,7 +374,7 @@ class LoadPointsFromMultiSweeps(object):
 
 @PIPELINES.register_module()
 class PointsFromLidartoEgo(object):
-    
+
     def __init__(self, translate2ego=True):
         self.translate2ego = translate2ego
 
@@ -395,10 +382,11 @@ class PointsFromLidartoEgo(object):
         if self.translate2ego:
             lidar2lidarego = np.eye(4, dtype=np.float32)
             lidar2lidarego[:3, :3] = Quaternion(
-            results['curr']['lidar2ego_rotation']).rotation_matrix
+                results['curr']['lidar2ego_rotation']).rotation_matrix
             lidar2lidarego[:3, 3] = results['curr']['lidar2ego_translation']
             lidar2lidarego = torch.from_numpy(lidar2lidarego)
-            results['points'].tensor[:, :3]  = results['points'].tensor[:, :3].matmul(lidar2lidarego[:3, :3].T) + lidar2lidarego[:3, 3]
+            results['points'].tensor[:, :3] = results['points'].tensor[:, :3].matmul(
+                lidar2lidarego[:3, :3].T) + lidar2lidarego[:3, 3]
         return results
 
 
@@ -482,11 +470,11 @@ class NormalizePointsColor(object):
         """
         points = results['points']
         assert points.attribute_dims is not None and \
-            'color' in points.attribute_dims.keys(), \
+               'color' in points.attribute_dims.keys(), \
             'Expect points have color attribute'
         if self.color_mean is not None:
             points.color = points.color - \
-                points.color.new_tensor(self.color_mean)
+                           points.color.new_tensor(self.color_mean)
         points.color = points.color / 255.0
         results['points'] = points
         return results
@@ -548,9 +536,9 @@ class LoadPointsFromFile(object):
         self.use_dim = use_dim
         self.file_client_args = file_client_args.copy()
         self.file_client = None
-        if dtype=='float32':
+        if dtype == 'float32':
             self.dtype = np.float32
-        elif dtype== 'float16':
+        elif dtype == 'float16':
             self.dtype = np.float16
         else:
             assert False
@@ -579,7 +567,6 @@ class LoadPointsFromFile(object):
 
         return points
 
-
     def __call__(self, results):
         """Call function to load points data from file.
 
@@ -596,8 +583,6 @@ class LoadPointsFromFile(object):
         points = self._load_points(pts_filename)
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
-
-
 
         attribute_dims = None
 
@@ -628,10 +613,11 @@ class LoadPointsFromFile(object):
         if self.translate2ego:
             lidar2lidarego = np.eye(4, dtype=np.float32)
             lidar2lidarego[:3, :3] = Quaternion(
-            results['curr']['lidar2ego_rotation']).rotation_matrix
+                results['curr']['lidar2ego_rotation']).rotation_matrix
             lidar2lidarego[:3, 3] = results['curr']['lidar2ego_translation']
             lidar2lidarego = torch.from_numpy(lidar2lidarego)
-            results['points'].tensor[:, :3]  = results['points'].tensor[:, :3].matmul(lidar2lidarego[:3, :3].T) + lidar2lidarego[:3, 3]
+            results['points'].tensor[:, :3] = results['points'].tensor[:, :3].matmul(
+                lidar2lidarego[:3, :3].T) + lidar2lidarego[:3, 3]
 
         return results
 
@@ -644,8 +630,6 @@ class LoadPointsFromFile(object):
         repr_str += f'load_dim={self.load_dim}, '
         repr_str += f'use_dim={self.use_dim})'
         return repr_str
-
-
 
 
 @PIPELINES.register_module()
@@ -886,24 +870,22 @@ class PointToMultiViewDepth(object):
         coor = torch.round(points[:, :2] / self.downsample)
         depth = points[:, 2]
         kept1 = (coor[:, 0] >= 0) & (coor[:, 0] < width) & (
-            coor[:, 1] >= 0) & (coor[:, 1] < height) & (
-                depth < self.grid_config['depth'][1]) & (
-                    depth >= self.grid_config['depth'][0])
+                coor[:, 1] >= 0) & (coor[:, 1] < height) & (
+                        depth < self.grid_config['depth'][1]) & (
+                        depth >= self.grid_config['depth'][0])
         coor, depth = coor[kept1], depth[kept1]
 
         ranks = coor[:, 0] + coor[:, 1] * width
         sort = (ranks + depth / 100.).argsort()
         coor, depth, ranks = coor[sort], depth[sort], ranks[sort]
 
-
         kept2 = torch.ones(coor.shape[0], device=coor.device, dtype=torch.bool)
         kept2[1:] = (ranks[1:] != ranks[:-1])
         coor, depth = coor[kept2], depth[kept2]
 
-
         coor = coor.to(torch.long)
         depth_map[coor[:, 1], coor[:, 0]] = depth
-     
+
         return depth_map
 
     def __call__(self, results):
@@ -956,17 +938,14 @@ class PointToMultiViewDepth(object):
             points_img = points_img.matmul(
                 post_rots[cid].T) + post_trans[cid:cid + 1, :]
             depth_map = self.points2depthmap(points_img, imgs.shape[2],
-                                             imgs.shape[3])  
+                                             imgs.shape[3])
             depth_map_list.append(depth_map)
-          
+
         depth_map = torch.stack(depth_map_list)
 
         results['gt_depth'] = depth_map
 
         return results
-
-
-
 
 
 def mmlabNormalize(img, mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True, debug=False):
@@ -976,12 +955,11 @@ def mmlabNormalize(img, mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.3
     to_rgb = to_rgb
     if debug:
         print('warning, debug in mmlabNormalize')
-        img = np.asarray(img) # not normalize for visualization
+        img = np.asarray(img)  # not normalize for visualization
     else:
         img = imnormalize(np.array(img), mean, std, to_rgb)
     img = torch.tensor(img).float().permute(2, 0, 1).contiguous()
     return img
-
 
 
 @PIPELINES.register_module()
@@ -997,15 +975,15 @@ class PrepareImageInputs(object):
     """
 
     def __init__(
-        self,
-        data_config,
-        is_train=False,
-        sequential=False,
-        ego_cam='CAM_FRONT',
+            self,
+            data_config,
+            is_train=False,
+            sequential=False,
+            ego_cam='CAM_FRONT',
 
-        normalize_cfg=dict(
-             mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True, debug=False
-        )
+            normalize_cfg=dict(
+                mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True, debug=False
+            )
     ):
         self.is_train = is_train
         self.data_config = data_config
@@ -1155,10 +1133,9 @@ class PrepareImageInputs(object):
         keysensor2keyego[:3, -1] = keysensor2keyego_tran
         keyego2keysensor = keysensor2keyego.inverse()
         keysensor2sweepsensor = (
-            keyego2keysensor @ global2keyego @ sweepego2global
-            @ sweepsensor2sweepego).inverse()
+                keyego2keysensor @ global2keyego @ sweepego2global
+                @ sweepsensor2sweepego).inverse()
         return sweepsensor2keyego, keysensor2sweepsensor
-
 
     def get_sensor_transforms(self, cam_info, cam_name):
         w, x, y, z = cam_info['cams'][cam_name]['sensor2ego_rotation']
@@ -1218,7 +1195,8 @@ class PrepareImageInputs(object):
             # image view augmentation (resize, crop, horizontal flip, rotate)
             if results.get('tta_config', None) is not None:
                 flip = results['tta_config']['tta_flip']
-            else: flip = None
+            else:
+                flip = None
             img_augs = self.sample_augmentation(
                 H=img.height, W=img.width, flip=flip, scale=scale)
             resize, resize_dims, crop, flip, rotate = img_augs
@@ -1293,7 +1271,7 @@ class PrepareImageInputs(object):
                 trans.extend(trans_adj)
                 sensor2sensors.extend(sensor2sensors_adj)
         imgs = torch.stack(imgs)
-        
+
         sensor2egos = torch.stack(sensor2egos)
         ego2globals = torch.stack(ego2globals)
 
@@ -1315,7 +1293,7 @@ class PrepareImageInputs(object):
 @PIPELINES.register_module()
 class LoadAnnotationsBEVDepth(object):
 
-    def __init__(self, bda_aug_conf, classes, is_train=True):
+    def __init__(self, bda_aug_conf, classes=None, is_train=True):
         self.bda_aug_conf = bda_aug_conf
         self.is_train = is_train
         self.classes = classes
@@ -1358,17 +1336,17 @@ class LoadAnnotationsBEVDepth(object):
         rot_mat = flip_mat @ (scale_mat @ rot_mat)
         if gt_boxes.shape[0] > 0:
             gt_boxes[:, :3] = (
-                rot_mat @ gt_boxes[:, :3].unsqueeze(-1)).squeeze(-1)
+                    rot_mat @ gt_boxes[:, :3].unsqueeze(-1)).squeeze(-1)
             gt_boxes[:, 3:6] *= scale_ratio
             gt_boxes[:, 6] += rotate_angle
             if flip_dx:
                 gt_boxes[:,
-                         6] = 2 * torch.asin(torch.tensor(1.0)) - gt_boxes[:,
-                                                                           6]
+                6] = 2 * torch.asin(torch.tensor(1.0)) - gt_boxes[:,
+                                                         6]
             if flip_dy:
                 gt_boxes[:, 6] = -gt_boxes[:, 6]
             gt_boxes[:, 7:] = (
-                rot_mat[:2, :2] @ gt_boxes[:, 7:].unsqueeze(-1)).squeeze(-1)
+                    rot_mat[:2, :2] @ gt_boxes[:, 7:].unsqueeze(-1)).squeeze(-1)
         return gt_boxes, rot_mat
 
     def __call__(self, results):
@@ -1376,7 +1354,7 @@ class LoadAnnotationsBEVDepth(object):
         gt_boxes, gt_labels = torch.Tensor(np.array(gt_boxes)), torch.tensor(np.array(gt_labels))
         tta_confg = results.get('tta_config', None)
         rotate_bda, scale_bda, flip_dx, flip_dy = self.sample_bda_augmentation(tta_confg
-        )
+                                                                               )
         bda_mat = torch.zeros(4, 4)
         bda_mat[3, 3] = 1
         gt_boxes, bda_rot = self.bev_transform(gt_boxes, rotate_bda, scale_bda,
@@ -1388,11 +1366,8 @@ class LoadAnnotationsBEVDepth(object):
             LiDARInstance3DBoxes(gt_boxes, box_dim=gt_boxes.shape[-1],
                                  origin=(0.5, 0.5, 0.5))
         results['gt_labels_3d'] = gt_labels
-        imgs, rots, trans, intrins = results['img_inputs'][:4]
-        post_rots, post_trans = results['img_inputs'][4:]
-        results['img_inputs'] = (imgs, rots, trans, intrins, post_rots,
-                                 post_trans, bda_rot)
-        
+
+        results['bda_mat'] = bda_mat
         results['flip_dx'] = flip_dx
         results['flip_dy'] = flip_dy
         results['rotate_bda'] = rotate_bda
@@ -1400,3 +1375,262 @@ class LoadAnnotationsBEVDepth(object):
 
         return results
 
+
+@PIPELINES.register_module()
+class LoadMultiViewResizeImageFromFiles(object):
+    """Load multi channel images from a list of separate channel files.
+
+    Expects results['img_filename'] to be a list of filenames.
+
+    Args:
+        to_float32 (bool): Whether to convert the img to float32.
+            Defaults to False.
+        color_type (str): Color type of the file. Defaults to 'unchanged'.
+    """
+
+    def __init__(self,
+                 to_float32=False,
+                 color_type='unchanged',
+                 data_config=None,
+                 is_train=False,
+                 ):
+        self.to_float32 = to_float32
+        self.color_type = color_type
+
+        self.data_config = data_config
+        self.is_train = is_train
+
+    def sample_augmentation(self, H, W, flip=None, scale=None):
+        fH, fW = self.data_config['input_size']
+        if self.is_train:
+            resize = float(fW) / float(W)
+            resize += np.random.uniform(*self.data_config['resize'])
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims
+            crop_h = int((1 - np.random.uniform(*self.data_config['crop_h'])) *
+                         newH) - fH
+            crop_w = int(np.random.uniform(0, max(0, newW - fW)))
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = self.data_config['flip'] and np.random.choice([0, 1])
+            rotate = np.random.uniform(*self.data_config['rot'])
+        else:
+            resize = float(fW) / float(W)
+            resize += self.data_config.get('resize_test', 0.0)
+            if scale is not None:
+                resize = scale
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims
+            crop_h = int((1 - np.mean(self.data_config['crop_h'])) * newH) - fH
+            crop_w = int(max(0, newW - fW) / 2)
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = False if flip is None else flip
+            rotate = 0
+        return resize, resize_dims, crop, flip, rotate
+
+    def img_transform_core(self, img, resize_dims, crop, flip, rotate):
+        # adjust image
+        img = img.resize(resize_dims)
+        img = img.crop(crop)
+        if flip:
+            img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
+        img = img.rotate(rotate)
+        return img
+
+    def get_rot(self, h):
+        return torch.Tensor([
+            [np.cos(h), np.sin(h)],
+            [-np.sin(h), np.cos(h)],
+        ])
+
+    def img_transform(self, img, post_rot, post_tran, resize, resize_dims,
+                      crop, flip, rotate):
+        # adjust image
+        img = self.img_transform_core(img, resize_dims, crop, flip, rotate)
+
+        # post-homography transformation
+        post_rot *= resize
+        post_tran -= torch.Tensor(crop[:2])
+        if flip:
+            A = torch.Tensor([[-1, 0], [0, 1]])
+            b = torch.Tensor([crop[2] - crop[0], 0])
+            post_rot = A.matmul(post_rot)
+            post_tran = A.matmul(post_tran) + b
+        A = self.get_rot(rotate / 180 * np.pi)
+        b = torch.Tensor([crop[2] - crop[0], crop[3] - crop[1]]) / 2
+        b = A.matmul(-b) + b
+        post_rot = A.matmul(post_rot)
+        post_tran = A.matmul(post_tran) + b
+
+        return img, post_rot, post_tran
+
+    def __call__(self, results):
+        """Call function to load multi-view image from files.
+
+        Args:
+            results (dict): Result dict containing multi-view image filenames.
+
+        Returns:
+            dict: The result dict containing the multi-view image data. \
+                Added keys and values are described below.
+
+                - filename (str): Multi-view image filenames.
+                - img (np.ndarray): Multi-view image arrays.
+                - img_shape (tuple[int]): Shape of multi-view image arrays.
+                - ori_shape (tuple[int]): Shape of original image arrays.
+                - pad_shape (tuple[int]): Shape of padded image arrays.
+                - scale_factor (float): Scale factor.
+                - img_norm_cfg (dict): Normalization configuration of images.
+        """
+        filename = results['img_filename']
+
+        imgs = []
+        img_shapes = []
+        post_matrices = []
+        for i in range(len(filename)):
+            img = Image.open(filename[i])  # RGB
+            img_augs = self.sample_augmentation(
+                H=img.height, W=img.width, flip=None, scale=None)
+            resize, resize_dims, crop, flip, rotate = img_augs
+
+            post_rot = torch.eye(2)
+            post_tran = torch.zeros(2)
+            img, post_rot2, post_tran2 = \
+                self.img_transform(img, post_rot,
+                                   post_tran,
+                                   resize=resize,
+                                   resize_dims=resize_dims,
+                                   crop=crop,
+                                   flip=flip,
+                                   rotate=rotate)
+
+            post_tran = torch.zeros(3)
+            post_rot = torch.eye(3)
+            post_tran[:2] = post_tran2
+            post_rot[:2, :2] = post_rot2
+
+            post_matrix = np.eye(4, dtype=np.float32)
+            post_matrix[:3, :3] = post_rot
+            post_matrix[:3, -1] = post_tran
+
+            imgs.append(np.array(img, dtype=np.float32)[:, :, ::-1])  # RGB->BGR
+            img_shapes.append(np.array(img).shape)
+            results['lidar2img'][i] = post_matrix @ results['lidar2img'][i]
+            post_matrices.append(post_matrix)
+
+        results['post_matrix'] = post_matrices
+        results['img'] = imgs
+        results['img_shape'] = img_shapes
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(to_float32={self.to_float32}, '
+        repr_str += f"color_type='{self.color_type}')"
+        return repr_str
+
+
+@PIPELINES.register_module()
+class LoadOccGTFromFile(object):
+    """Load multi channel images from a list of separate channel files.
+
+    Expects results['img_filename'] to be a list of filenames.
+    note that we read image in BGR style to align with opencv.imread
+    Args:
+        to_float32 (bool): Whether to convert the img to float32.
+            Defaults to False.
+        color_type (str): Color type of the file. Defaults to 'unchanged'.
+    """
+
+    def __init__(
+            self,
+            data_root,
+    ):
+        self.data_root = data_root
+
+    def __call__(self, results):
+        # print(results.keys())
+        if 'occ_gt_path' in results:
+            occ_gt_path = results['occ_gt_path']
+            # occ_gt_path = os.path.join(self.data_root, occ_gt_path)
+
+            occ_labels = np.load(occ_gt_path)
+            semantics = occ_labels['semantics']
+            mask_lidar = occ_labels['mask_lidar']
+            mask_camera = occ_labels['mask_camera']
+        else:
+            semantics = np.zeros((200, 200, 16), dtype=np.uint8)
+            mask_lidar = np.zeros((200, 200, 16), dtype=np.uint8)
+            mask_camera = np.zeros((200, 200, 16), dtype=np.uint8)
+
+        if results['rotate_bda'] != 0:
+            assert False, 'rotate_bda is 0'
+
+        if results['flip_dx']:  # flip x
+            # ValueError: At least one stride in the given numpy array is negative, and tensors with negative strides are not currently supported.
+            semantics = np.flip(semantics, [0]).copy()
+            mask_lidar = np.flip(mask_lidar, [0]).copy()
+            mask_camera = np.flip(mask_camera, [0]).copy()
+
+        if results['flip_dy']:  # flip y
+            semantics = np.flip(semantics, [1]).copy()
+            mask_lidar = np.flip(mask_lidar, [1]).copy()
+            mask_camera = np.flip(mask_camera, [1]).copy()
+
+        results['voxel_semantics'] = semantics
+        results['mask_lidar'] = mask_lidar
+        results['mask_camera'] = mask_camera
+
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        return "{} (data_root={}')".format(
+            self.__class__.__name__, self.data_root)
+
+
+@PIPELINES.register_module()
+class KittiSetOrigin:
+    def __init__(self, point_cloud_range):
+        point_cloud_range = np.array(point_cloud_range, dtype=np.float32)
+        self.origin = (point_cloud_range[:3] + point_cloud_range[3:]) / 2.
+
+    def __call__(self, results):
+        results['origin'] = self.origin.copy()
+        return results
+
+
+@PIPELINES.register_module()
+class NormalizeMultiviewImage(object):
+    """Normalize the image.
+    Added key is "img_norm_cfg".
+    Args:
+        mean (sequence): Mean values of 3 channels.
+        std (sequence): Std values of 3 channels.
+        to_rgb (bool): Whether to convert the image from BGR to RGB,
+            default is true.
+    """
+
+    def __init__(self, mean, std, to_rgb=True):
+        self.mean = np.array(mean, dtype=np.float32)
+        self.std = np.array(std, dtype=np.float32)
+        self.to_rgb = to_rgb
+
+    def __call__(self, results):
+        """Call function to normalize images.
+        Args:
+            results (dict): Result dict from loading pipeline.
+        Returns:
+            dict: Normalized results, 'img_norm_cfg' key is added into
+                result dict.
+        """
+
+        results['img'] = [mmcv.imnormalize(img, self.mean, self.std, self.to_rgb) for img in results['img']]
+        results['img_norm_cfg'] = dict(
+            mean=self.mean, std=self.std, to_rgb=self.to_rgb)
+        return results
+
+    def __repr__(self):
+        repr_str = self.__class__.__name__
+        repr_str += f'(mean={self.mean}, std={self.std}, to_rgb={self.to_rgb})'
+        return repr_str

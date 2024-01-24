@@ -4,25 +4,29 @@
 # To view a copy of this license, visit 
 # https://github.com/NVlabs/FB-BEV/blob/main/LICENSE
 
-
+import csv
+import math
+import os
 # Copyright (c) OpenMMLab. All rights reserved.
 import tempfile
 from os import path as osp
-import os
+
 import mmcv
 import numpy as np
 import pyquaternion
+import torch
+from nuscenes.eval.common.utils import Quaternion
 from nuscenes.utils.data_classes import Box as NuScenesBox
-from .utils import nuscenes_get_rt_matrix
-from ..core import show_result
-from ..core.bbox import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
+from nuscenes.utils.geometry_utils import transform_matrix
+from tqdm import tqdm
+
 from .builder import DATASETS
 from .custom_3d import Custom3DDataset
 from .pipelines import Compose
-from tqdm import tqdm
-import csv
-import math
-import torch
+from .utils import nuscenes_get_rt_matrix
+from ..core import show_result
+from ..core.bbox import Box3DMode, Coord3DMode, LiDARInstance3DBoxes
+
 
 @DATASETS.register_module()
 class NuScenesDataset(Custom3DDataset):
@@ -153,7 +157,7 @@ class NuScenesDataset(Custom3DDataset):
                  # SOLLOFusion
                  use_sequence_group_flag=False,
                  sequences_split_num=1,
-                ):
+                 ):
         self.load_interval = load_interval
         self.use_valid_flag = use_valid_flag
 
@@ -181,7 +185,6 @@ class NuScenesDataset(Custom3DDataset):
                 use_external=False,
             )
 
-
         self.img_info_prototype = img_info_prototype
         self.multi_adj_frame_id_cfg = multi_adj_frame_id_cfg
         self.ego_cam = ego_cam
@@ -193,9 +196,7 @@ class NuScenesDataset(Custom3DDataset):
         if self.test_mode:
             assert self.sequences_split_num == 1
         if self.use_sequence_group_flag:
-            self._set_sequence_group_flag() # Must be called after load_annotations b/c load_annotations does sorting.
-
-
+            self._set_sequence_group_flag()  # Must be called after load_annotations b/c load_annotations does sorting.
 
     def get_cat_ids(self, idx):
         """Get category distribution of single scene.
@@ -237,12 +238,11 @@ class NuScenesDataset(Custom3DDataset):
         self.version = self.metadata['version']
         return data_infos
 
-
     def _set_sequence_group_flag(self):
         """
         Set each sequence to be a different group
         """
-           
+
         res = []
         curr_sequence = 0
         for idx in range(len(self.data_infos)):
@@ -262,9 +262,9 @@ class NuScenesDataset(Custom3DDataset):
                 curr_new_flag = 0
                 for curr_flag in range(len(bin_counts)):
                     curr_sequence_length = np.array(
-                        list(range(0, 
-                                bin_counts[curr_flag], 
-                                math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
+                        list(range(0,
+                                   bin_counts[curr_flag],
+                                   math.ceil(bin_counts[curr_flag] / self.sequences_split_num)))
                         + [bin_counts[curr_flag]])
                     for sub_seq_idx in (curr_sequence_length[1:] - curr_sequence_length[:-1]):
                         for _ in range(sub_seq_idx):
@@ -303,11 +303,11 @@ class NuScenesDataset(Custom3DDataset):
             sweeps=info['sweeps'],
             scene_name=info['scene_name'],
             timestamp=info['timestamp'] / 1e6,
-            lidarseg_filename=info.get('lidarseg_filename', 'None') 
+            lidarseg_filename=info.get('lidarseg_filename', 'None')
         )
         if 'ann_infos' in info:
             input_dict['ann_infos'] = info['ann_infos']
-            
+
         if self.modality['use_camera']:
             if self.img_info_prototype == 'mmcv':
                 image_paths = []
@@ -319,23 +319,22 @@ class NuScenesDataset(Custom3DDataset):
                     lidar2cam_r = np.linalg.inv(
                         cam_info['sensor2lidar_rotation'])
                     lidar2cam_t = cam_info[
-                        'sensor2lidar_translation'] @ lidar2cam_r.T
+                                      'sensor2lidar_translation'] @ lidar2cam_r.T
                     lidar2cam_rt = np.eye(4)
                     lidar2cam_rt[:3, :3] = lidar2cam_r.T
                     lidar2cam_rt[3, :3] = -lidar2cam_t
                     intrinsic = cam_info['cam_intrinsic']
                     viewpad = np.eye(4)
                     viewpad[:intrinsic.shape[0], :intrinsic.
-                            shape[1]] = intrinsic
+                    shape[1]] = intrinsic
                     lidar2img_rt = (viewpad @ lidar2cam_rt.T)
                     lidar2img_rts.append(lidar2img_rt)
                     cam_position = np.linalg.inv(lidar2cam_rt.T) @ np.array([0., 0., 0., 1.]).reshape([4, 1])
                     cam_positions.append(cam_position.flatten()[:3])
-                   
 
                 input_dict.update(
                     dict(
-                        
+
                         img_filename=image_paths,
                         lidar2img=lidar2img_rts,
                     ))
@@ -343,7 +342,7 @@ class NuScenesDataset(Custom3DDataset):
                 if not self.test_mode:
                     annos = self.get_ann_info(index)
                     input_dict['ann_info'] = annos
-            else:   
+            else:
                 assert 'bevdet' in self.img_info_prototype
                 input_dict.update(dict(curr=info))
                 if '4d' in self.img_info_prototype:
@@ -356,10 +355,10 @@ class NuScenesDataset(Custom3DDataset):
                 # Get a transformation matrix from current keyframe lidar to previous keyframe lidar
                 # if they belong to same sequence.
                 input_dict['nuscenes_get_rt_matrix'] = dict(
-                    lidar2ego_rotation = self.data_infos[index]['lidar2ego_rotation'],
-                    lidar2ego_translation = self.data_infos[index]['lidar2ego_translation'],
-                    ego2global_rotation = self.data_infos[index]['ego2global_rotation'],
-                    ego2global_translation = self.data_infos[index]['ego2global_translation'],
+                    lidar2ego_rotation=self.data_infos[index]['lidar2ego_rotation'],
+                    lidar2ego_translation=self.data_infos[index]['lidar2ego_translation'],
+                    ego2global_rotation=self.data_infos[index]['ego2global_rotation'],
+                    ego2global_translation=self.data_infos[index]['ego2global_translation'],
                 )
                 if not input_dict['start_of_sequence']:
                     input_dict['curr_to_prev_lidar_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
@@ -367,32 +366,32 @@ class NuScenesDataset(Custom3DDataset):
                         "lidar", "lidar"))
                     input_dict['prev_lidar_to_global_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
                         self.data_infos[index - 1], self.data_infos[index],
-                        "lidar", "global")) # TODO: Note that global is same for all.
+                        "lidar", "global"))  # TODO: Note that global is same for all.
                     input_dict['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
                         self.data_infos[index], self.data_infos[index - 1],
                         "ego", "ego"))
                 else:
                     input_dict['curr_to_prev_lidar_rt'] = torch.eye(4).float()
-                    input_dict['prev_lidar_to_global_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix( 
+                    input_dict['prev_lidar_to_global_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
                         self.data_infos[index], self.data_infos[index], "lidar", "global")
-                        )
+                    )
                     input_dict['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
                         self.data_infos[index], self.data_infos[index],
                         "ego", "ego"))
                 input_dict['global_to_curr_lidar_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
                     self.data_infos[index], self.data_infos[index],
                     "global", "lidar"))
-                
+
         return input_dict
 
     def get_adj_info(self, info, index):
         info_adj_list = []
         for select_id in range(*self.multi_adj_frame_id_cfg):
             if select_id == 0: continue
-            select_id = min(max(index - select_id, 0), len(self.data_infos)-1)
+            select_id = min(max(index - select_id, 0), len(self.data_infos) - 1)
 
             if not self.data_infos[select_id]['scene_token'] == info[
-                    'scene_token']:
+                'scene_token']:
                 info_adj_list.append(info)
             else:
                 info_adj_list.append(self.data_infos[select_id])
@@ -461,7 +460,7 @@ class NuScenesDataset(Custom3DDataset):
         """
         nusc_annos = {}
         mapped_class_names = self.CLASSES
-       
+
         print('Start to convert detection format...')
         for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
             boxes = det['boxes_3d'].tensor.numpy()
@@ -474,7 +473,6 @@ class NuScenesDataset(Custom3DDataset):
 
             sample_token = self.data_infos[sample_id]['token']
 
-            
             trans = self.data_infos[sample_id]['cams'][
                 self.ego_cam]['ego2global_translation']
             rot = self.data_infos[sample_id]['cams'][
@@ -492,14 +490,14 @@ class NuScenesDataset(Custom3DDataset):
                 nusc_box = NuScenesBox(center, wlh, quat, velocity=box_vel)
                 nusc_box.rotate(rot)
                 nusc_box.translate(trans)
-                if np.sqrt(nusc_box.velocity[0]**2 +
-                           nusc_box.velocity[1]**2) > 0.2:
+                if np.sqrt(nusc_box.velocity[0] ** 2 +
+                           nusc_box.velocity[1] ** 2) > 0.2:
                     if name in [
-                            'car',
-                            'construction_vehicle',
-                            'bus',
-                            'truck',
-                            'trailer',
+                        'car',
+                        'construction_vehicle',
+                        'bus',
+                        'truck',
+                        'trailer',
                     ]:
                         attr = 'vehicle.moving'
                     elif name in ['bicycle', 'motorcycle']:
@@ -646,39 +644,38 @@ class NuScenesDataset(Custom3DDataset):
         return result_files, tmp_dir
 
     def evaluate(self, results,
-                       logger=None,
-                        metric='bbox',
-                        jsonfile_prefix='test',
-                        result_names=['pts_bbox'],
-                        show=False,
-                        out_dir=None,
-                        pipeline=None,
-                        save=False,
-                        ):
-            results_dict = {}
-            
-            if results[0].get('pred_occupancy', None) is not None:
-                results_dict.update(self.evaluate_occupancy(results, show_dir=jsonfile_prefix, save=save))
-                
-            if results[0].get('iou', None) is not None:
-                results_dict.update(self.evaluate_mask(results))
-            
-            if results[0].get('pts_bbox', None) is not None:
-                results_dict.update(self.evaluate_bbox(results, logger=logger,
-                        metric=metric,
-                        jsonfile_prefix=jsonfile_prefix,
-                        result_names=result_names,
-                        show=show,
-                        out_dir=out_dir,
-                        pipeline=pipeline))
-            mmcv.mkdir_or_exist(jsonfile_prefix)
-            with open(osp.join(jsonfile_prefix, 'results.csv'), 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(list(results_dict.keys()))
-                writer.writerow(list(results_dict.values()))
+                 logger=None,
+                 metric='bbox',
+                 jsonfile_prefix='test',
+                 result_names=['pts_bbox'],
+                 show=False,
+                 out_dir=None,
+                 pipeline=None,
+                 save=False,
+                 ):
+        results_dict = {}
 
-            return results_dict
-            
+        if results[0].get('pred_occupancy', None) is not None:
+            results_dict.update(self.evaluate_occupancy(results, show_dir=jsonfile_prefix, save=save))
+
+        if results[0].get('iou', None) is not None:
+            results_dict.update(self.evaluate_mask(results))
+
+        if results[0].get('pts_bbox', None) is not None:
+            results_dict.update(self.evaluate_bbox(results, logger=logger,
+                                                   metric=metric,
+                                                   jsonfile_prefix=jsonfile_prefix,
+                                                   result_names=result_names,
+                                                   show=show,
+                                                   out_dir=out_dir,
+                                                   pipeline=pipeline))
+        mmcv.mkdir_or_exist(jsonfile_prefix)
+        with open(osp.join(jsonfile_prefix, 'results.csv'), 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(list(results_dict.keys()))
+            writer.writerow(list(results_dict.values()))
+
+        return results_dict
 
     def evaluate_occupancy(self, occ_results, runner=None, show_dir=None, save=False, **eval_kwargs):
         from .occ_metrics import Metric_mIoU, Metric_FScore
@@ -689,16 +686,16 @@ class NuScenesDataset(Custom3DDataset):
             mmcv.mkdir_or_exist(show_dir)
             mmcv.mkdir_or_exist(os.path.join(show_dir, 'occupancy_pred'))
             print('\nSaving output and gt in {} for visualization.'.format(show_dir))
-            begin= 0 # eval_kwargs.get('begin',None)
+            begin = 0  # eval_kwargs.get('begin',None)
 
-            end=1 if not save else len(occ_results) # eval_kwargs.get('end',None)
+            end = 1 if not save else len(occ_results)  # eval_kwargs.get('end',None)
         self.occ_eval_metrics = Metric_mIoU(
             num_classes=18,
             use_lidar_mask=False,
             use_image_mask=True)
-        
+
         self.eval_fscore = False
-        if  self.eval_fscore:
+        if self.eval_fscore:
             self.fscore_eval_metrics = Metric_FScore(
                 leaf_size=10,
                 threshold_acc=0.4,
@@ -723,10 +720,10 @@ class NuScenesDataset(Custom3DDataset):
             sample_token = info['token']
             occupancy_file_path = osp.join(self.occupancy_path, scene_name, sample_token, 'labels.npz')
             occ_gt = np.load(occupancy_file_path)
- 
+
             gt_semantics = occ_gt['semantics']
             mask_lidar = occ_gt['mask_lidar'].astype(bool)
-            mask_camera = occ_gt['mask_camera'].astype(bool)            
+            mask_camera = occ_gt['mask_camera'].astype(bool)
             # if show_dir is not None:
             #     if begin is not None and end is not None:
             #         if index>= begin and index<end:
@@ -736,45 +733,42 @@ class NuScenesDataset(Custom3DDataset):
             #             np.savez_compressed(save_path, pred=occ_pred[mask_camera], gt=occ_gt, sample_token=sample_token)
             #             with open(os.path.join(show_dir, 'occupancy_pred', 'file.txt'),'a') as f:
             #                 f.write(save_path+'\n')
-                        # np.savez_compressed(save_path+'_gt', pred= occ_gt['semantics'], gt=occ_gt, sample_token=sample_token)
-                # else:
-                #     sample_token=info['token']
-                #     save_path=os.path.join(show_dir,str(index).zfill(4))
-                #     np.savez_compressed(save_path,pred=occ_pred,gt=occ_gt,sample_token=sample_token)
-
+            # np.savez_compressed(save_path+'_gt', pred= occ_gt['semantics'], gt=occ_gt, sample_token=sample_token)
+            # else:
+            #     sample_token=info['token']
+            #     save_path=os.path.join(show_dir,str(index).zfill(4))
+            #     np.savez_compressed(save_path,pred=occ_pred,gt=occ_gt,sample_token=sample_token)
 
             self.occ_eval_metrics.add_batch(occ_pred[mask_camera], gt_semantics, mask_lidar, mask_camera)
             if self.eval_fscore:
                 self.fscore_eval_metrics.add_batch(occ_pred[mask_camera], gt_semantics, mask_lidar, mask_camera)
-   
+
         res = self.occ_eval_metrics.count_miou()
         if self.eval_fscore:
             res.update(self.fscore_eval_metrics.count_fscore())
-        
 
-        return res 
-        
+        return res
+
     def evaluate_mask(self, results):
         results_dict = {}
         iou = 0
         # ret_f1=[0,0,0,0,0]
         for i in range(len(results)):
-            iou+=results[i]['iou']
-        n=len(results)
-        iou = iou/n
+            iou += results[i]['iou']
+        n = len(results)
+        iou = iou / n
         results_dict['iou'] = iou
         return results_dict
-        
 
     def evaluate_bbox(self,
-                 results,
-                 metric='bbox',
-                 logger=None,
-                 jsonfile_prefix='test',
-                 result_names=['pts_bbox'],
-                 show=False,
-                 out_dir=None,
-                 pipeline=None):
+                      results,
+                      metric='bbox',
+                      logger=None,
+                      jsonfile_prefix='test',
+                      result_names=['pts_bbox'],
+                      show=False,
+                      out_dir=None,
+                      pipeline=None):
         """Evaluation in nuScenes protocol.
 
         Args:
@@ -797,7 +791,6 @@ class NuScenesDataset(Custom3DDataset):
             dict[str, float]: Results of each evaluation metric.
         """
         result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
-
 
         if isinstance(result_files, dict):
             results_dict = dict()
@@ -916,9 +909,9 @@ def output_to_nusc_box(detection, with_velocity=True):
         box_list.append(box)
     return box_list
 
+
 @DATASETS.register_module()
 class NuscenesOccupancy(NuScenesDataset):
-
     CLASSES = [
         "empty",
         "barrier",
@@ -983,9 +976,10 @@ class NuscenesOccupancy(NuScenesDataset):
         for k, v in category.items():
             k = int(k)
             if k == 17: continue
-            logv = max((np.log(v)/np.log(100)).round(),1)
+            logv = max((np.log(v) / np.log(100)).round(), 1)
             cat_ids.extend([k] * int(logv))
         return cat_ids
+
 
 def lidar_nusc_box_to_global(info,
                              boxes,
@@ -1023,3 +1017,119 @@ def lidar_nusc_box_to_global(info,
         box.translate(np.array(info['ego2global_translation']))
         box_list.append(box)
     return box_list
+
+
+@DATASETS.register_module()
+class InternalNuSceneOcc(NuScenesDataset):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def get_data_info(self, index):
+        """Get data info according to the given index.
+
+        Args:
+            index (int): Index of the sample data to get.
+
+        Returns:
+            dict: Data information that will be passed to the data
+                preprocessing pipelines. It includes the following keys:
+
+                - sample_idx (str): Sample index.
+                - pts_filename (str): Filename of point clouds.
+                - sweeps (list[dict]): Infos of sweeps.
+                - timestamp (float): Sample timestamp.
+                - img_filename (str, optional): Image filename.
+                - lidar2img (list[np.ndarray], optional): Transformations
+                    from lidar to different cameras.
+                - ann_info (dict): Annotation info.
+        """
+        info = self.data_infos[index]
+        # standard protocol modified from SECOND.Pytorch
+        input_dict = dict(
+            index=index,
+            sample_idx=info['token'],
+            pts_filename=info['lidar_path'],
+            sweeps=info['sweeps'],
+            scene_name=info['scene_name'],
+            timestamp=info['timestamp'] / 1e6,
+        )
+        if 'ann_infos' in info:
+            input_dict['ann_infos'] = info['ann_infos']
+
+        if 'occ_path' in info:
+            input_dict['occ_gt_path'] = os.path.join(info['occ_path'], 'labels.npz')
+
+        lidar2ego_rotation = info['lidar2ego_rotation']
+        lidar2ego_translation = info['lidar2ego_translation']
+        ego2lidar = transform_matrix(translation=lidar2ego_translation, rotation=Quaternion(lidar2ego_rotation),
+                                     inverse=True)
+        input_dict['ego2lidar'] = ego2lidar
+
+        if self.modality['use_camera']:
+
+            image_paths = []
+            lidar2img_rts = []
+            lidar2cam_rts = []
+            cam_intrinsics = []
+            for cam_type, cam_info in info['cams'].items():
+                image_paths.append(cam_info['data_path'])
+                # obtain lidar to image transformation matrix
+                lidar2cam_r = np.linalg.inv(cam_info['sensor2lidar_rotation'])
+                lidar2cam_t = cam_info[
+                                  'sensor2lidar_translation'] @ lidar2cam_r.T
+                lidar2cam_rt = np.eye(4)
+                lidar2cam_rt[:3, :3] = lidar2cam_r.T
+                lidar2cam_rt[3, :3] = -lidar2cam_t
+                intrinsic = cam_info['cam_intrinsic']
+                viewpad = np.eye(4)
+                viewpad[:intrinsic.shape[0], :intrinsic.shape[1]] = intrinsic
+                lidar2img_rt = (viewpad @ lidar2cam_rt.T)
+                lidar2img_rts.append(lidar2img_rt)
+
+                cam_intrinsics.append(viewpad)
+                lidar2cam_rts.append(lidar2cam_rt.T)
+            input_dict.update(
+                dict(
+                    img_filename=image_paths,
+                    lidar2img=lidar2img_rts,
+                    cam_intrinsic=cam_intrinsics,
+                    lidar2cam=lidar2cam_rts,
+                ))
+
+            input_dict.update(dict(curr=info))
+
+            if self.use_sequence_group_flag:
+                input_dict['sample_index'] = index
+                input_dict['sequence_group_idx'] = self.flag[index]
+                input_dict['start_of_sequence'] = index == 0 or self.flag[index - 1] != self.flag[index]
+                # Get a transformation matrix from current keyframe lidar to previous keyframe lidar
+                # if they belong to same sequence.
+                input_dict['nuscenes_get_rt_matrix'] = dict(
+                    lidar2ego_rotation=self.data_infos[index]['lidar2ego_rotation'],
+                    lidar2ego_translation=self.data_infos[index]['lidar2ego_translation'],
+                    ego2global_rotation=self.data_infos[index]['ego2global_rotation'],
+                    ego2global_translation=self.data_infos[index]['ego2global_translation'],
+                )
+                if not input_dict['start_of_sequence']:
+                    input_dict['curr_to_prev_lidar_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[index], self.data_infos[index - 1],
+                        "lidar", "lidar"))
+                    input_dict['prev_lidar_to_global_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[index - 1], self.data_infos[index],
+                        "lidar", "global"))  # TODO: Note that global is same for all.
+                    input_dict['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[index], self.data_infos[index - 1],
+                        "ego", "ego"))
+                else:
+                    input_dict['curr_to_prev_lidar_rt'] = torch.eye(4).float()
+                    input_dict['prev_lidar_to_global_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[index], self.data_infos[index], "lidar", "global")
+                    )
+                    input_dict['curr_to_prev_ego_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                        self.data_infos[index], self.data_infos[index],
+                        "ego", "ego"))
+                input_dict['global_to_curr_lidar_rt'] = torch.FloatTensor(nuscenes_get_rt_matrix(
+                    self.data_infos[index], self.data_infos[index],
+                    "global", "lidar"))
+
+        return input_dict
