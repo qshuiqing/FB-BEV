@@ -31,8 +31,16 @@ class FastOCC(MVXTwoStageDetector):
             with_cp=False,
             backproject='inplace',
             style='v4',
+            # bev encoder
             img_bev_encoder_backbone=None,
             img_bev_encoder_neck=None,
+            # Deal with history
+            do_history=True,
+            interpolation_mode='bilinear',
+            history_cat_num=16,
+            history_cat_conv_out_channels=None,
+            single_bev_num_channels=80,
+
             **kwargs
     ):
         super(FastOCC, self).__init__(**kwargs)
@@ -45,11 +53,7 @@ class FastOCC(MVXTwoStageDetector):
         else:
             self.neck_fuse = nn.Conv2d(neck_fuse["in_channels"], neck_fuse["out_channels"], 3, 1, 1)
 
-        # style
-        # v1: fastbev wo/ ms
-        # v2: fastbev + img ms
-        # v3: fastbev + bev ms
-        # v4: fastbev + img/bev ms
+        # style v4: fastbev + img/bev ms
         self.style = style
         assert self.style in ['v1', 'v2', 'v3', 'v4'], self.style
         self.multi_scale_id = multi_scale_id
@@ -64,9 +68,8 @@ class FastOCC(MVXTwoStageDetector):
             for i in range(5):
                 print("### extrnsic noise: {} ###".format(self.extrinsic_noise))
 
-        # detach adj feature
-        self.seq_detach = seq_detach
         self.backproject = backproject
+
         # checkpoint
         self.with_cp = with_cp
 
@@ -75,6 +78,41 @@ class FastOCC(MVXTwoStageDetector):
             if img_bev_encoder_backbone is not None else None
         self.img_bev_encoder_neck = builder.build_neck(img_bev_encoder_neck) \
             if img_bev_encoder_neck is not None else None
+
+        # # Deal with history
+        # self.single_bev_num_channels = single_bev_num_channels
+        # self.do_history = do_history
+        # self.interpolation_mode = interpolation_mode
+        # self.history_cat_num = history_cat_num
+        # self.history_cam_sweep_freq = 0.5  # seconds between each frame
+        # history_cat_conv_out_channels = (history_cat_conv_out_channels
+        #                                  if history_cat_conv_out_channels is not None
+        #                                  else self.single_bev_num_channels)
+        # ## Embed each sample with its relative temporal offset with current timestep
+        # conv = nn.Conv2d if self.forward_projection.nx[-1] == 1 else nn.Conv3d
+        # self.history_keyframe_time_conv = nn.Sequential(
+        #     conv(self.single_bev_num_channels + 1,
+        #          self.single_bev_num_channels,
+        #          kernel_size=1,
+        #          padding=0,
+        #          stride=1),
+        #     nn.SyncBatchNorm(self.single_bev_num_channels),
+        #     nn.ReLU(inplace=True))
+        # ## Then concatenate and send them through an MLP.
+        # self.history_keyframe_cat_conv = nn.Sequential(
+        #     conv(self.single_bev_num_channels * (self.history_cat_num + 1),
+        #          history_cat_conv_out_channels,
+        #          kernel_size=1,
+        #          padding=0,
+        #          stride=1),
+        #     nn.SyncBatchNorm(history_cat_conv_out_channels),
+        #     nn.ReLU(inplace=True))
+        # self.history_sweep_time = None
+        # self.history_bev = None
+        # self.history_bev_before_encoder = None
+        # self.history_seq_ids = None
+        # self.history_forward_augs = None
+        # self.count = 0
 
     def with_specific_component(self, component_name):
         """Whether the model owns a specific component"""
@@ -97,9 +135,6 @@ class FastOCC(MVXTwoStageDetector):
                 projection.append(intrinsic @ ego2img[:3])
         return torch.stack(projection)
 
-    def image_encoder(self, img):
-        pass
-
     @force_fp32()
     def bev_encoder(self, x):
         """
@@ -118,6 +153,154 @@ class FastOCC(MVXTwoStageDetector):
             x = x[0]
 
         return x
+
+    @force_fp32()
+    def fuse_history(self, curr_bev, img_metas, bda):  # align features with 3d shift
+
+        voxel_feat = True if len(curr_bev.shape) == 5 else False
+        if voxel_feat:
+            curr_bev = curr_bev.permute(0, 1, 4, 2, 3)  # n, c, z, h, w
+
+        seq_ids = torch.LongTensor([
+            single_img_metas['sequence_group_idx']
+            for single_img_metas in img_metas]).to(curr_bev.device)
+        start_of_sequence = torch.BoolTensor([
+            single_img_metas['start_of_sequence']
+            for single_img_metas in img_metas]).to(curr_bev.device)
+        forward_augs = generate_forward_transformation_matrix(bda)
+
+        curr_to_prev_ego_rt = torch.stack([
+            single_img_metas['curr_to_prev_ego_rt']
+            for single_img_metas in img_metas]).to(curr_bev)
+
+        ## Deal with first batch
+        if self.history_bev is None:
+            self.history_bev = curr_bev.clone()
+            self.history_seq_ids = seq_ids.clone()
+            self.history_forward_augs = forward_augs.clone()
+
+            # Repeat the first frame feature to be history
+            if voxel_feat:
+                self.history_bev = curr_bev.repeat(1, self.history_cat_num, 1, 1, 1)
+            else:
+                self.history_bev = curr_bev.repeat(1, self.history_cat_num, 1, 1)
+            # All 0s, representing current timestep.
+            self.history_sweep_time = curr_bev.new_zeros(curr_bev.shape[0], self.history_cat_num)
+
+        self.history_bev = self.history_bev.detach()
+
+        assert self.history_bev.dtype == torch.float32
+
+        ## Deal with the new sequences
+        # First, sanity check. For every non-start of sequence, history id and seq id should be same.
+
+        assert (self.history_seq_ids != seq_ids)[~start_of_sequence].sum() == 0, \
+            "{}, {}, {}".format(self.history_seq_ids, seq_ids, start_of_sequence)
+
+        ## Replace all the new sequences' positions in history with the curr_bev information
+        self.history_sweep_time += 1  # new timestep, everything in history gets pushed back one.
+        if start_of_sequence.sum() > 0:
+            if voxel_feat:
+                self.history_bev[start_of_sequence] = curr_bev[start_of_sequence].repeat(1, self.history_cat_num, 1, 1,
+                                                                                         1)
+            else:
+                self.history_bev[start_of_sequence] = curr_bev[start_of_sequence].repeat(1, self.history_cat_num, 1, 1)
+
+            self.history_sweep_time[start_of_sequence] = 0  # zero the new sequence timestep starts
+            self.history_seq_ids[start_of_sequence] = seq_ids[start_of_sequence]
+            self.history_forward_augs[start_of_sequence] = forward_augs[start_of_sequence]
+
+        ## Get grid idxs & grid2bev first.
+        if voxel_feat:
+            n, c_, z, h, w = curr_bev.shape
+
+        # Generate grid
+        xs = torch.linspace(0, w - 1, w, dtype=curr_bev.dtype, device=curr_bev.device).view(1, w, 1).expand(h, w, z)
+        ys = torch.linspace(0, h - 1, h, dtype=curr_bev.dtype, device=curr_bev.device).view(h, 1, 1).expand(h, w, z)
+        zs = torch.linspace(0, z - 1, z, dtype=curr_bev.dtype, device=curr_bev.device).view(1, 1, z).expand(h, w, z)
+        grid = torch.stack(
+            (xs, ys, zs, torch.ones_like(xs)), -1).view(1, h, w, z, 4).expand(n, h, w, z, 4).view(n, h, w, z, 4, 1)
+
+        # This converts BEV indices to meters
+        # IMPORTANT: the feat2bev[0, 3] is changed from feat2bev[0, 2] because previous was 2D rotation
+        # which has 2-th index as the hom index. Now, with 3D hom, 3-th is hom
+        feat2bev = torch.zeros((4, 4), dtype=grid.dtype).to(grid)
+        feat2bev[0, 0] = self.forward_projection.dx[0]
+        feat2bev[1, 1] = self.forward_projection.dx[1]
+        feat2bev[2, 2] = self.forward_projection.dx[2]
+        feat2bev[0, 3] = self.forward_projection.bx[0] - self.forward_projection.dx[0] / 2.
+        feat2bev[1, 3] = self.forward_projection.bx[1] - self.forward_projection.dx[1] / 2.
+        feat2bev[2, 3] = self.forward_projection.bx[2] - self.forward_projection.dx[2] / 2.
+        # feat2bev[2, 2] = 1
+        feat2bev[3, 3] = 1
+        feat2bev = feat2bev.view(1, 4, 4)
+
+        ## Get flow for grid sampling.
+        # The flow is as follows. Starting from grid locations in curr bev, transform to BEV XY11,
+        # backward of current augmentations, curr lidar to prev lidar, forward of previous augmentations,
+        # transform to previous grid locations.
+        rt_flow = (torch.inverse(feat2bev) @ self.history_forward_augs @ curr_to_prev_ego_rt
+                   @ torch.inverse(forward_augs) @ feat2bev)
+
+        grid = rt_flow.view(n, 1, 1, 1, 4, 4) @ grid
+
+        # normalize and sample
+        normalize_factor = torch.tensor([w - 1.0, h - 1.0, z - 1.0], dtype=curr_bev.dtype, device=curr_bev.device)
+        grid = grid[:, :, :, :, :3, 0] / normalize_factor.view(1, 1, 1, 1, 3) * 2.0 - 1.0
+
+        tmp_bev = self.history_bev
+        if voxel_feat:
+            n, mc, z, h, w = tmp_bev.shape
+            tmp_bev = tmp_bev.reshape(n, mc, z, h, w)
+        sampled_history_bev = F.grid_sample(tmp_bev, grid.to(curr_bev.dtype).permute(0, 3, 1, 2, 4), align_corners=True,
+                                            mode=self.interpolation_mode)
+
+        ## Update history
+        # Add in current frame to features & timestep
+        self.history_sweep_time = torch.cat(
+            [self.history_sweep_time.new_zeros(self.history_sweep_time.shape[0], 1), self.history_sweep_time],
+            dim=1)  # B x (1 + T)
+
+        if voxel_feat:
+            sampled_history_bev = sampled_history_bev.reshape(n, mc, z, h, w)
+            curr_bev = curr_bev.reshape(n, c_, z, h, w)
+        feats_cat = torch.cat([curr_bev, sampled_history_bev],
+                              dim=1)  # B x (1 + T) * 80 x H x W or B x (1 + T) * 80 xZ x H x W
+
+        # Reshape and concatenate features and timestep
+        feats_to_return = feats_cat.reshape(
+            feats_cat.shape[0], self.history_cat_num + 1, self.single_bev_num_channels,
+            *feats_cat.shape[2:])  # B x (1 + T) x 80 x H x W
+        if voxel_feat:
+            feats_to_return = torch.cat(
+                [feats_to_return, self.history_sweep_time[:, :, None, None, None, None].repeat(
+                    1, 1, 1, *feats_to_return.shape[3:]) * self.history_cam_sweep_freq
+                 ], dim=2)  # B x (1 + T) x 81 x Z x H x W
+        else:
+            feats_to_return = torch.cat(
+                [feats_to_return, self.history_sweep_time[:, :, None, None, None].repeat(
+                    1, 1, 1, feats_to_return.shape[3], feats_to_return.shape[4]) * self.history_cam_sweep_freq
+                 ], dim=2)  # B x (1 + T) x 81 x H x W
+
+        # Time conv
+        feats_to_return = self.history_keyframe_time_conv(
+            feats_to_return.reshape(-1, *feats_to_return.shape[2:])).reshape(
+            feats_to_return.shape[0], feats_to_return.shape[1], -1,
+            *feats_to_return.shape[3:])  # B x (1 + T) x 80 xZ x H x W
+
+        # Cat keyframes & conv
+        feats_to_return = self.history_keyframe_cat_conv(
+            feats_to_return.reshape(
+                feats_to_return.shape[0], -1, *feats_to_return.shape[3:]))  # B x C x H x W or B x C x Z x H x W
+
+        self.history_bev = feats_cat[:, :-self.single_bev_num_channels, ...].detach().clone()
+        self.history_sweep_time = self.history_sweep_time[:, :-1]
+        self.history_forward_augs = forward_augs.clone()
+        if voxel_feat:
+            feats_to_return = feats_to_return.permute(0, 1, 3, 4, 2)
+        if not self.do_history:
+            self.history_bev = None
+        return feats_to_return.clone()
 
     def extract_feat(self, points, img, img_metas):
         B = img.shape[0]  # B:1
@@ -305,10 +488,6 @@ class FastOCC(MVXTwoStageDetector):
     def forward_test(self, img, img_metas, **kwargs):
 
         return self.simple_test(img, img_metas)
-
-        # if not self.test_cfg.get('use_tta', False):
-        #     return self.simple_test(img, img_metas)
-        # return self.aug_test(img, img_metas)
 
     def simple_test(self, img, img_metas):
 

@@ -242,14 +242,22 @@ for key in ['val', 'test']:
 
 # Optimizer
 lr = 2e-4
-optimizer = dict(type='AdamW', lr=lr, weight_decay=1e-2)
+optimizer = dict(
+    type='AdamW',
+    lr=2e-4,
+    paramwise_cfg=dict(
+        custom_keys={
+            'img_backbone': dict(lr_mult=0.1),
+        }),
+    weight_decay=0.01)
 
-optimizer_config = dict(grad_clip=dict(max_norm=5, norm_type=2))
+optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
 lr_config = dict(
     policy='step',
     warmup='linear',
-    warmup_iters=200,
-    warmup_ratio=0.001,
+    warmup_iters=500,
+    warmup_ratio=1.0 / 3,
+    # min_lr_ratio=1e-3,
     step=[num_iters_per_epoch * num_epochs, ])
 runner = dict(type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
 checkpoint_config = dict(
@@ -275,4 +283,4 @@ custom_hooks = [
     # ),
 ]
 load_from = 'ckpts/cascade_mask_rcnn_r50_fpn_coco-mstrain_3x_20e_nuim_bbox_mAP_0.5400_segm_mAP_0.4300.pth'
-fp16 = dict(loss_scale='dynamic')
+# fp16 = dict(loss_scale='dynamic')
